@@ -39,24 +39,89 @@ func (db *DB) GetEdgesByNode(nodeID string) ([]*model.Edge, error) {
 	return scanEdges(rows)
 }
 
+// GetNeighborEdges returns every edge touching nodeID with the columns beam
+// search scores on (metadata and created_at are left zero). Both halves are
+// answered from the covering indexes alone, and the fixed order makes recall
+// deterministic: beam search stops at a visit budget, so which neighbours it
+// reaches depends on the order edges arrive in.
+func (db *DB) GetNeighborEdges(nodeID string) ([]*model.Edge, error) {
+	rows, err := db.execer().Query(
+		`SELECT source_id, target_id, edge_type, weight FROM edges WHERE source_id = ?
+		 UNION ALL
+		 SELECT source_id, target_id, edge_type, weight FROM edges WHERE target_id = ? AND source_id != ?
+		 ORDER BY weight DESC, source_id, target_id, edge_type`,
+		nodeID, nodeID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []*model.Edge
+	for rows.Next() {
+		var e model.Edge
+		var edgeType string
+		if err := rows.Scan(&e.SourceID, &e.TargetID, &edgeType, &e.Weight); err != nil {
+			return nil, err
+		}
+		e.EdgeType = model.EdgeType(edgeType)
+		results = append(results, &e)
+	}
+	return results, rows.Err()
+}
+
+// GetSupersededIDs returns which of the given ids are the target of at least
+// one 'supersedes' edge from a different insight, i.e. which of them some
+// other insight claims to replace. Recall uses this to demote stale content;
+// the rows are kept so the lineage stays inspectable.
+//
+// It reads every supersedes edge from the partial idx_edges_supersedes (a few
+// thousand rows, a few hundred KB) and filters to the caller's ids in memory:
+// probing each candidate through the whole-graph target index costs a random
+// read per candidate on a cold cache. SQLite's planner does not pick a partial
+// index by itself, hence INDEXED BY. A read-only open skips migrations, so a
+// store no writable open has touched since the index was introduced lacks it;
+// that store falls back to the scoped lookup.
+func (db *DB) GetSupersededIDs(ids []string) (map[string]bool, error) {
+	superseded := make(map[string]bool)
+	if len(ids) == 0 {
+		return superseded, nil
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	ex := db.execer()
+	rows, err := ex.Query(
+		`SELECT target_id FROM edges INDEXED BY idx_edges_supersedes
+		 WHERE edge_type = 'supersedes' AND source_id != target_id`)
+	if err != nil && strings.Contains(err.Error(), "no such index") {
+		return scopedSupersededIDs(ex, ids)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if want[id] {
+			superseded[id] = true
+		}
+	}
+	return superseded, rows.Err()
+}
+
 // supersededLookupChunk bounds how many ids go into one IN clause. SQLite's
 // host-parameter ceiling is 32766 on current builds and 999 on older ones;
 // 500 stays inside both. Recall's candidate set is normally far smaller, so
 // the loop below runs once.
 const supersededLookupChunk = 500
 
-// GetSupersededIDs returns which of the given ids are the target of at least
-// one 'supersedes' edge, i.e. which of them some other insight claims to
-// replace. Recall uses this to demote stale content; the rows are kept so the
-// lineage stays inspectable.
-//
-// The lookup is scoped to the ids the caller holds. Reading every supersedes
-// edge in the store would cost time proportional to its whole supersession
-// history on a path that only needs a verdict for the current candidates,
-// and idx_edges_target_type answers the scoped form from the index.
-func (db *DB) GetSupersededIDs(ids []string) (map[string]bool, error) {
+// scopedSupersededIDs answers GetSupersededIDs through idx_edges_target_type
+// for stores that predate idx_edges_supersedes.
+func scopedSupersededIDs(ex dbExecer, ids []string) (map[string]bool, error) {
 	superseded := make(map[string]bool)
-	ex := db.execer()
 	for start := 0; start < len(ids); start += supersededLookupChunk {
 		end := min(start+supersededLookupChunk, len(ids))
 		if err := collectSupersededIDs(ex, ids[start:end], superseded); err != nil {

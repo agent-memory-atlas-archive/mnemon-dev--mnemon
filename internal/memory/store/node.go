@@ -245,6 +245,20 @@ func (db *DB) LoadKnownEntities() (map[string]bool, error) {
 	return known, nil
 }
 
+// KnownEntities is LoadKnownEntities over insights the caller already loaded
+// (GetAllActiveInsights), sparing recall a second scan of the table.
+func KnownEntities(active []*model.Insight) map[string]bool {
+	known := make(map[string]bool)
+	for _, ins := range active {
+		for _, e := range ins.Entities {
+			if e != "" {
+				known[e] = true
+			}
+		}
+	}
+	return known
+}
+
 // IncrementAccessCount bumps the access count and refreshes last_accessed_at.
 // No-op when the database is read-only.
 func (db *DB) IncrementAccessCount(id string) error {
