@@ -485,6 +485,7 @@ reported by ID in the triggering command's `auto_pruned_ids` field.
 | `MNEMON_EMBED_MODEL` | `nomic-embed-text` | Embedding model name |
 | `MNEMON_EMBED_PROTOCOL` | *(auto-detect)* | `ollama` or `openai`; auto-detected from an endpoint ending in `/v1` |
 | `MNEMON_EMBED_API_KEY` | *(none)* | Bearer token for OpenAI-compatible servers (oMLX, vLLM, etc.) |
+| `MNEMON_EMBED_KEEP_ALIVE` | `30m` | How long Ollama keeps the embedding model loaded after each request (ignored for OpenAI-compatible servers) |
 | `MNEMON_EMBED_DIMENSIONS` | *(native)* | Optional Matryoshka dimension truncation |
 
 The embedding client speaks the Ollama API by default and the

@@ -420,6 +420,7 @@ Sub-agent 委派是可选执行策略。当 runtime 支持时，主 agent 可以
 | `MNEMON_EMBED_MODEL` | `nomic-embed-text` | 嵌入模型名称 |
 | `MNEMON_EMBED_PROTOCOL` | *（自动探测）* | `ollama` 或 `openai`；端点以 `/v1` 结尾时自动切换 |
 | `MNEMON_EMBED_API_KEY` | *（无）* | OpenAI 兼容服务器（oMLX、vLLM 等）的 Bearer 令牌 |
+| `MNEMON_EMBED_KEEP_ALIVE` | `30m` | 每次请求后 Ollama 保持嵌入模型加载的时长（OpenAI 兼容服务器忽略此项） |
 | `MNEMON_EMBED_DIMENSIONS` | *（原生维度）* | 可选的 Matryoshka 维度截断 |
 
 每次自动删除均为软删除，以 `prune` 操作记录到 oplog，并通过触发命令的

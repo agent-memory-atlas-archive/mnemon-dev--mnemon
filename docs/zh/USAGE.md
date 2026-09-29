@@ -238,6 +238,9 @@ mnemon gc --threshold 0.5 --limit 20
 
 # GC keep — 提升某个洞察的保留度
 mnemon gc --keep <id>
+
+# GC compact — 以 VACUUM 重写存储，保持冷启动召回速度
+mnemon gc --compact
 ```
 
 ### 记忆体管理
@@ -330,6 +333,7 @@ open graph.html
 | `MNEMON_EMBED_MODEL` | `nomic-embed-text` | 嵌入模型 |
 | `MNEMON_EMBED_PROTOCOL` | （自动探测） | `ollama` 或 `openai`；以 `/v1` 结尾的端点自动选择 `openai` |
 | `MNEMON_EMBED_API_KEY` | （无） | OpenAI 兼容服务器的 Bearer 令牌 |
+| `MNEMON_EMBED_KEEP_ALIVE` | 30m | 每次请求后 Ollama 保持嵌入模型加载的时长 |
 | `MNEMON_EMBED_DIMENSIONS` | (原生维度) | 嵌入向量维度；可设置截断值（例如 Matryoshka 模型使用 `256`） |
 | `MNEMON_MAX_INSIGHTS` | `1000` | 触发自动清理的活跃洞察数量上限；设为 `0` 可关闭自动清理 |
 | `MNEMON_AUTO_PRUNE_MIN_AGE` | `24h` | 可被自动清理前的最短存活时间；支持 `24h`、整数天 `7d`，设为 `0` 可关闭保护期 |

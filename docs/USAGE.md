@@ -266,6 +266,9 @@ mnemon gc --threshold 0.5 --limit 20
 
 # GC keep — boost an insight's retention
 mnemon gc --keep <id>
+
+# GC compact — rewrite the store with VACUUM to keep cold recalls fast
+mnemon gc --compact
 ```
 
 ### Store Management
@@ -360,6 +363,7 @@ Nodes are colored by category (decision, fact, insight, preference, context); ed
 | `MNEMON_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
 | `MNEMON_EMBED_PROTOCOL` | (auto-detect) | `ollama` or `openai`; endpoints ending in `/v1` select `openai` |
 | `MNEMON_EMBED_API_KEY` | (none) | Bearer token for OpenAI-compatible servers |
+| `MNEMON_EMBED_KEEP_ALIVE` | 30m | How long Ollama keeps the embedding model loaded after each request |
 | `MNEMON_EMBED_DIMENSIONS` | (native) | Embedding dimensions; set to truncate (e.g., `256` for Matryoshka models) |
 | `MNEMON_MAX_INSIGHTS` | `1000` | Active-insight ceiling before auto-pruning starts; `0` disables auto-pruning |
 | `MNEMON_AUTO_PRUNE_MIN_AGE` | `24h` | Minimum age before automatic pruning; accepts durations such as `24h`, integer days such as `7d`, or `0` to disable the grace period |
