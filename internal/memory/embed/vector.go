@@ -36,14 +36,26 @@ func SerializeVector(v []float64) []byte {
 
 // DeserializeVector decodes a little-endian float32 blob into a float64 slice.
 func DeserializeVector(b []byte) []float64 {
+	return DeserializeVectorInto(b, nil)
+}
+
+// DeserializeVectorInto decodes the same format as DeserializeVector, reusing
+// dst's backing array when it has enough capacity. The caller owns that array
+// and must consume its contents before reusing it. Invalid blobs return nil.
+func DeserializeVectorInto(b []byte, dst []float64) []float64 {
 	if len(b) == 0 || len(b)%4 != 0 {
 		return nil
 	}
-	v := make([]float64, len(b)/4)
-	for i := range v {
-		v[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:])))
+	n := len(b) / 4
+	if cap(dst) < n {
+		dst = make([]float64, n)
+	} else {
+		dst = dst[:n]
 	}
-	return v
+	for i := range dst {
+		dst[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:])))
+	}
+	return dst
 }
 
 // DeserializeLegacyVector decodes a pre-migration little-endian float64 blob.

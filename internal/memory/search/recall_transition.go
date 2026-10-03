@@ -3,7 +3,6 @@ package search
 import (
 	"sort"
 
-	"github.com/mnemon-dev/mnemon/internal/memory/embed"
 	"github.com/mnemon-dev/mnemon/internal/memory/model"
 )
 
@@ -17,8 +16,8 @@ type recallTransition struct {
 // scoring before the visit budget can discard a neighbour. The ordering and
 // deltas are reusable across anchors within this one recall, whose query and
 // intent do not change. The current path score is added by the caller.
-func rankRecallTransitions(nodeID string, edges []*model.Edge, query []float64,
-	weights IntentWeights, embeddings map[string][]float64) []recallTransition {
+func rankRecallTransitions(nodeID string, edges []*model.Edge,
+	weights IntentWeights, similarities map[string]float64) []recallTransition {
 	transitions := make([]recallTransition, 0, len(edges))
 	for _, e := range edges {
 		id := e.TargetID
@@ -26,12 +25,8 @@ func rankRecallTransitions(nodeID string, edges []*model.Edge, query []float64,
 			id = e.SourceID
 		}
 		delta := lambda1 * weights[e.EdgeType] * e.Weight
-		if query != nil {
-			if vector, ok := embeddings[id]; ok {
-				if similarity := embed.CosineSimilarity(query, vector); similarity > 0 {
-					delta += lambda2 * similarity
-				}
-			}
+		if similarity := similarities[id]; similarity > 0 {
+			delta += lambda2 * similarity
 		}
 		transitions = append(transitions, recallTransition{id: id, edgeType: e.EdgeType, delta: delta})
 	}

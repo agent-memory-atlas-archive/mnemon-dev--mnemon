@@ -127,6 +127,49 @@ func TestDeserializeVector_InvalidLength(t *testing.T) {
 	}
 }
 
+func TestDeserializeVectorInto_ReusesCapacityAndResizes(t *testing.T) {
+	dst := make([]float64, 0, 4)
+	backing := &dst[:cap(dst)][0]
+	for _, input := range [][]float64{{1, -2, 3}, {4}, {5, 6, 7, 8}, {9, 10, 11, 12, 13}, {-14, 15}} {
+		oldCapacity := cap(dst)
+		dst = DeserializeVectorInto(SerializeVector(input), dst)
+		if len(dst) != len(input) {
+			t.Fatalf("decoded length = %d, want %d", len(dst), len(input))
+		}
+		if len(input) <= oldCapacity && &dst[0] != backing {
+			t.Fatal("decoder did not reuse available capacity")
+		}
+		for i, want := range input {
+			if dst[i] != want {
+				t.Fatalf("decoded[%d] = %v, want %v", i, dst[i], want)
+			}
+		}
+		backing = &dst[0]
+	}
+	for _, blob := range [][]byte{nil, {}, {1}, {1, 2, 3, 4, 5}} {
+		if got := DeserializeVectorInto(blob, dst); got != nil {
+			t.Fatalf("invalid blob returned stale vector: %v", got)
+		}
+	}
+}
+
+func TestDeserializeVectorInto_PreservesFloatBits(t *testing.T) {
+	// Include subnormal, signed zero, infinity and NaN encodings as well as
+	// normal values. Buffer reuse must not change float32-to-float64 decoding.
+	bits := []uint32{0, 1, 0x80000000, 0x3f800000, 0xbf800000, 0x7f7fffff, 0x7f800000, 0xff800000, 0x7fc00001}
+	blob := make([]byte, len(bits)*4)
+	for i, value := range bits {
+		binary.LittleEndian.PutUint32(blob[i*4:], value)
+	}
+	got := DeserializeVectorInto(blob, make([]float64, len(bits)))
+	for i, value := range bits {
+		want := float64(math.Float32frombits(value))
+		if math.Float64bits(got[i]) != math.Float64bits(want) {
+			t.Fatalf("float bits changed at %d: got %x want %x", i, math.Float64bits(got[i]), math.Float64bits(want))
+		}
+	}
+}
+
 func TestDeserializeLegacyVector_InvalidLength(t *testing.T) {
 	if v := DeserializeLegacyVector(make([]byte, 7)); v != nil {
 		t.Errorf("invalid legacy blob length: want nil, got %v", v)

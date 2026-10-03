@@ -107,7 +107,7 @@ func parseAutoPruneMinAge(raw string) (time.Duration, error) {
 
 // InsertInsight inserts a new insight into the database.
 func (db *DB) InsertInsight(i *model.Insight) error {
-	_, err := db.execer().Exec(
+	return db.execInsert(&db.txInsertInsight,
 		`INSERT INTO insights (id, content, category, importance, tags, entities, source, access_count, stored_at, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.ID, i.Content, string(i.Category), i.Importance,
@@ -115,7 +115,6 @@ func (db *DB) InsertInsight(i *model.Insight) error {
 		time.Now().UTC().Format(time.RFC3339),
 		i.CreatedAt.Format(time.RFC3339), i.UpdatedAt.Format(time.RFC3339),
 	)
-	return err
 }
 
 // GetInsightByID returns a single insight by ID (excludes soft-deleted).
@@ -835,7 +834,7 @@ func (db *DB) ScanEmbeddings(fn func(id string, blob []byte) bool) error {
 			}
 		}
 	}
-	return nil
+	return rows.Err()
 }
 
 // EmbeddingStats returns total insights and how many have embeddings.

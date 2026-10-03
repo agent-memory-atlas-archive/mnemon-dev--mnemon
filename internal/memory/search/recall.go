@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mnemon-dev/mnemon/internal/memory/embed"
 	"github.com/mnemon-dev/mnemon/internal/memory/model"
 	"github.com/mnemon-dev/mnemon/internal/memory/store"
 )
@@ -155,72 +154,58 @@ func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, que
 	weights := GetWeights(intent)
 	params := getTraversalParams(intent)
 
-	activeByID := make(map[string]*model.Insight, len(all))
-	for _, ins := range all {
-		activeByID[ins.ID] = ins
-	}
-
-	// Pre-load all embeddings once (avoids N+1 queries in beam search and reranking).
-	var embedCache map[string][]float64
-	if queryVec != nil {
-		if dbEmbeds, err := db.GetAllEmbeddings(); err == nil {
-			embedCache = make(map[string][]float64, len(dbEmbeds))
-			for _, e := range dbEmbeds {
-				if v := embed.DeserializeVector(e.Embedding); v != nil {
-					embedCache[e.ID] = v
-				}
-			}
-		}
-	}
-	hasEmbeddings := embedCache != nil && len(embedCache) > 0
+	// Cache only this query's scalar signals and ranked transitions it visits.
+	// Full vectors and token sets need not survive their first scoring pass.
+	cache := newRecallCache(db, all, queryVec, weights)
+	hasEmbeddings := len(cache.similarities) > 0
 
 	// Step 2: Multi-signal anchor selection via RRF
 	type anchor struct {
-		insight *model.Insight
-		score   float64
-		via     string
+		score float64
+		via   string
 	}
 	anchorMap := make(map[string]*anchor)
 
-	// Signal 1: Keyword search (populates tokenCache for reranking reuse)
-	tokenCache := make(map[string]map[string]bool, len(all))
-	keywordAnchors := keywordSearchCached(all, query, anchorTopK, tokenCache)
+	// Signal 1: Keyword search (retains scalar scores for reranking)
+	keywordScores := make(map[string]float64, len(all))
+	keywordAnchors := keywordSearchCached(all, query, anchorTopK, keywordScores)
 	for rank, a := range keywordAnchors {
 		anchorMap[a.Insight.ID] = &anchor{
-			insight: a.Insight,
-			score:   1.0 / float64(rrfK+rank+1),
-			via:     "keyword",
+			score: 1.0 / float64(rrfK+rank+1),
+			via:   "keyword",
 		}
 	}
 
 	// Signal 2: Vector search (when available, uses pre-loaded cache)
 	if hasEmbeddings {
-		vectorHits := vectorSearchFromCache(embedCache, queryVec, anchorTopK)
+		vectorHits := vectorSearchFromScores(cache.similarities, anchorTopK)
 		for rank, vh := range vectorHits {
 			rrfScore := 1.0 / float64(rrfK+rank+1)
 			if existing, ok := anchorMap[vh.id]; ok {
 				existing.score += rrfScore
 				existing.via = "hybrid"
 			} else {
-				ins, err := db.GetInsightByID(vh.id)
-				if err != nil || ins == nil {
+				ins := cache.insights[vh.id]
+				if ins == nil {
 					continue
 				}
 				anchorMap[vh.id] = &anchor{
-					insight: ins,
-					score:   rrfScore,
-					via:     "vector",
+					score: rrfScore,
+					via:   "vector",
 				}
 			}
 		}
 	}
 
 	// Signal 3: Time-based ranking (MAGMA third RRF signal)
-	timeSorted := make([]*model.Insight, len(all))
-	copy(timeSorted, all)
-	sort.Slice(timeSorted, func(i, j int) bool {
-		return timeSorted[i].CreatedAt.After(timeSorted[j].CreatedAt)
-	})
+	timeSorted := all
+	byNewest := func(i, j int) bool { return timeSorted[i].CreatedAt.After(timeSorted[j].CreatedAt) }
+	// SQL already orders normal UTC timestamps. Verify absolute time order
+	// before reusing it: imported RFC3339 offsets need not sort lexically.
+	if !sort.SliceIsSorted(timeSorted, byNewest) {
+		timeSorted = append([]*model.Insight(nil), all...)
+		sort.Slice(timeSorted, byNewest)
+	}
 	timeLimit := anchorTopK
 	if timeLimit > len(timeSorted) {
 		timeLimit = len(timeSorted)
@@ -235,9 +220,8 @@ func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, que
 			}
 		} else {
 			anchorMap[ins.ID] = &anchor{
-				insight: ins,
-				score:   rrfScore,
-				via:     "time",
+				score: rrfScore,
+				via:   "time",
 			}
 		}
 	}
@@ -260,25 +244,20 @@ func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, que
 	// Initialize score map with anchors
 	scoreMap := make(map[string]float64)
 	viaMap := make(map[string]string)
-	insightMap := make(map[string]*model.Insight)
 
 	for id, a := range anchorMap {
 		scoreMap[id] = a.score
 		viaMap[id] = a.via
-		insightMap[id] = a.insight
 	}
 
-	// Step 3: Beam search from each anchor. Anchors' neighbourhoods overlap
-	// heavily, so each node's edges are read from the store once per recall.
-	edgeCache := make(map[string][]recallTransition)
+	// Step 3: Beam search from each anchor
 	for id, a := range anchorMap {
-		beamSearchFromAnchor(db, id, a.score, queryVec, weights, params, scoreMap, viaMap, insightMap, embedCache, activeByID, edgeCache)
+		cache.beamSearchFromAnchor(id, a.score, params, scoreMap, viaMap)
 	}
 
 	traversedCount := len(scoreMap)
 
 	// Step 4: Multi-factor reranking
-	queryTokens := Tokenize(query)
 	queryEntitySet := make(map[string]bool, len(queryEntities))
 	for _, e := range queryEntities {
 		queryEntitySet[strings.ToLower(e)] = true
@@ -300,7 +279,7 @@ func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, que
 	var graphMin, graphMax float64
 	first := true
 	for id, graphRaw := range scoreMap {
-		ins, ok := insightMap[id]
+		ins, ok := cache.insights[id]
 		if !ok {
 			continue
 		}
@@ -330,20 +309,8 @@ func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, que
 	for i := range candidates {
 		c := &candidates[i]
 
-		// keyword_score: token overlap (reuses pre-computed tokens from KeywordSearch)
-		if len(queryTokens) > 0 {
-			contentTokens := tokenCache[c.id]
-			if contentTokens == nil {
-				contentTokens = insightTokens(c.ins)
-			}
-			intersection := 0
-			for t := range queryTokens {
-				if contentTokens[t] {
-					intersection++
-				}
-			}
-			c.kwScore = float64(intersection) / float64(len(queryTokens))
-		}
+		// keyword_score: exactly the overlap computed during anchor selection.
+		c.kwScore = keywordScores[c.id]
 
 		// entity_score: entity overlap
 		if len(queryEntitySet) > 0 {
@@ -356,14 +323,9 @@ func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, que
 			c.entScore = float64(matched) / math.Max(1, float64(len(queryEntitySet)))
 		}
 
-		// similarity: cosine similarity with query vector (uses pre-loaded cache)
-		if hasEmbeddings {
-			if nVec, ok := embedCache[c.id]; ok {
-				sim := embed.CosineSimilarity(queryVec, nVec)
-				if sim > 0 {
-					c.simScore = sim
-				}
-			}
+		// similarity: reuse the cosine computed during the embedding scan.
+		if sim := cache.similarities[c.id]; sim > 0 {
+			c.simScore = sim
 		}
 
 		// graph_score: min-max normalized beam search score
@@ -518,25 +480,14 @@ func causalTopologicalSort(db *store.DB, results []RecallResult) []RecallResult 
 	return ordered
 }
 
-// beamSearchFromAnchor performs beam search starting from a single anchor node.
-// It uses a priority queue to keep the top beamWidth candidates at each depth level.
-// embedCache provides pre-loaded embedding vectors (nil = no embeddings).
-// activeByID resolves neighbours without a query; a neighbour missing from it
-// is soft-deleted and never enters insightMap. edgeCache memoises scored edge
-// transitions across anchors within one recall.
-func beamSearchFromAnchor(
-	db *store.DB,
+// beamSearchFromAnchor keeps traversal budgets and per-anchor visited sets local;
+// ranked transitions and similarities are reused within this recall only.
+func (cache *recallCache) beamSearchFromAnchor(
 	startID string,
 	startScore float64,
-	queryVec []float64,
-	weights IntentWeights,
 	params TraversalParams,
 	scoreMap map[string]float64,
 	viaMap map[string]string,
-	insightMap map[string]*model.Insight,
-	embedCache map[string][]float64,
-	activeByID map[string]*model.Insight,
-	edgeCache map[string][]recallTransition,
 ) {
 	visited := map[string]bool{startID: true}
 	totalVisited := 1
@@ -563,14 +514,9 @@ func beamSearchFromAnchor(
 				break
 			}
 
-			transitions, cached := edgeCache[cur.id]
-			if !cached {
-				edges, err := db.GetNeighborEdges(cur.id)
-				if err != nil {
-					continue
-				}
-				transitions = rankRecallTransitions(cur.id, edges, queryVec, weights, embedCache)
-				edgeCache[cur.id] = transitions
+			transitions, err := cache.transitionsFor(cur.id)
+			if err != nil {
+				continue
 			}
 
 			for _, transition := range transitions {
@@ -584,11 +530,6 @@ func beamSearchFromAnchor(
 				if existing, ok := scoreMap[neighborID]; !ok || neighborScore > existing {
 					scoreMap[neighborID] = neighborScore
 					viaMap[neighborID] = string(transition.edgeType)
-					if _, loaded := insightMap[neighborID]; !loaded {
-						if ins, ok := activeByID[neighborID]; ok {
-							insightMap[neighborID] = ins
-						}
-					}
 				}
 
 				if !visited[neighborID] {
@@ -677,28 +618,16 @@ func (h *vectorHitMinHeap) Pop() interface{} {
 	return item
 }
 
-// vectorSearch performs brute-force cosine similarity search, loading embeddings from DB.
-// Used by tests; the main recall path uses vectorSearchFromCache with a pre-loaded cache.
+// vectorSearch is the database-backed entry used by the vector search tests.
 func vectorSearch(db *store.DB, queryVec []float64, limit int) []vectorHit {
-	dbEmbeds, err := db.GetAllEmbeddings()
-	if err != nil || len(dbEmbeds) == 0 {
-		return nil
-	}
-	cache := make(map[string][]float64, len(dbEmbeds))
-	for _, e := range dbEmbeds {
-		if v := embed.DeserializeVector(e.Embedding); v != nil {
-			cache[e.ID] = v
-		}
-	}
-	return vectorSearchFromCache(cache, queryVec, limit)
+	return vectorSearchFromScores(loadQuerySimilarities(db, queryVec), limit)
 }
 
-// vectorSearchFromCache performs cosine similarity search over pre-loaded embeddings.
-// Uses a min-heap to maintain the top-k results in O(n log k) instead of O(n log n).
-func vectorSearchFromCache(embedCache map[string][]float64, queryVec []float64, limit int) []vectorHit {
+// vectorSearchFromScores selects exact top-k vector anchors in O(N log K),
+// reusing similarities that beam search and reranking also consume.
+func vectorSearchFromScores(similarities map[string]float64, limit int) []vectorHit {
 	h := &vectorHitMinHeap{}
-	for id, vec := range embedCache {
-		sim := embed.CosineSimilarity(queryVec, vec)
+	for id, sim := range similarities {
 		if sim <= 0.1 {
 			continue
 		}

@@ -13,13 +13,12 @@ func (db *DB) InsertEdge(e *model.Edge) error {
 	if e.EdgeType == model.EdgeSupersedes && e.SourceID == e.TargetID {
 		return fmt.Errorf("supersedes requires distinct insights")
 	}
-	_, err := db.execer().Exec(
+	return db.execInsert(&db.txInsertEdge,
 		`INSERT OR REPLACE INTO edges (source_id, target_id, edge_type, weight, metadata, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		e.SourceID, e.TargetID, string(e.EdgeType), e.Weight,
 		e.MetadataJSON(), e.CreatedAt.Format(time.RFC3339),
 	)
-	return err
 }
 
 // GetEdgesByNode returns all edges where the given node is source or target.
@@ -65,6 +64,44 @@ func (db *DB) GetNeighborEdges(nodeID string) ([]*model.Edge, error) {
 		results = append(results, &e)
 	}
 	return results, rows.Err()
+}
+
+// GetTraversalEdges returns incident edges in insertion order, optionally
+// filtered by type. BFS previously obtained this order by scanning the entire
+// edges table; preserving it matters when a node limit cuts a frontier.
+func (db *DB) GetTraversalEdges(nodeID string, edgeType model.EdgeType) ([]*model.Edge, error) {
+	query, args := traversalEdgeQuery(nodeID, edgeType)
+	rows, err := db.execer().Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	edges, err := scanEdges(rows)
+	if err != nil {
+		return nil, err
+	}
+	return edges, rows.Err()
+}
+
+func traversalEdgeQuery(nodeID string, edgeType model.EdgeType) (string, []any) {
+	const columns = "source_id, target_id, edge_type, weight, metadata, created_at"
+	source := "SELECT rowid AS edge_order, " + columns + " FROM edges WHERE source_id = ?"
+	target := "SELECT rowid AS edge_order, " + columns + " FROM edges WHERE target_id = ? AND source_id != ?"
+	args := []any{nodeID}
+	if edgeType != "" {
+		source += " AND edge_type = ?"
+		target += " AND edge_type = ?"
+		args = append(args, string(edgeType))
+	}
+	args = append(args, nodeID, nodeID)
+	if edgeType != "" {
+		args = append(args, string(edgeType))
+	}
+	// UNION keeps each endpoint lookup on its own composite index. A factored
+	// OR with an edge_type filter can instead scan every edge of that type.
+	// Excluding self-loops from the target branch returns each edge only once.
+	query := "SELECT " + columns + " FROM (" + source + " UNION ALL " + target + ") ORDER BY edge_order"
+	return query, args
 }
 
 // GetSupersededIDs checks only the requested targets, using the covering partial

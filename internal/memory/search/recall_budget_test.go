@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mnemon-dev/mnemon/internal/memory/embed"
 	"github.com/mnemon-dev/mnemon/internal/memory/model"
 )
 
@@ -25,9 +26,8 @@ func TestRecallBudgetKeepsBestTransition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := testDB(t)
 			now := time.Now().UTC()
-			active := make(map[string]*model.Insight)
 			for _, id := range []string{"root", "gold", "noise1", "noise2", "noise3"} {
-				active[id] = insertInsight(t, db, id, id, "test", 3, nil, now)
+				insertInsight(t, db, id, id, "test", 3, nil, now)
 			}
 			for i := 1; i <= 3; i++ {
 				if err := db.InsertEdge(&model.Edge{SourceID: "root", TargetID: fmt.Sprintf("noise%d", i), EdgeType: model.EdgeEntity, Weight: 1, CreatedAt: now}); err != nil {
@@ -42,15 +42,15 @@ func TestRecallBudgetKeepsBestTransition(t *testing.T) {
 				t.Fatal(err)
 			}
 			var query []float64
-			var embeddings map[string][]float64
 			if tc.vector {
 				query = []float64{1, 0}
-				embeddings = map[string][]float64{"gold": {1, 0}}
+				if err := db.UpdateEmbedding("gold", embed.SerializeVector(query)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			scores := map[string]float64{"root": 1}
 			via := map[string]string{}
-			insights := map[string]*model.Insight{"root": active["root"]}
-			beamSearchFromAnchor(db, "root", 1, query, GetWeights(tc.intent), TraversalParams{BeamWidth: 2, MaxDepth: 1, MaxVisited: 3}, scores, via, insights, embeddings, active, make(map[string][]recallTransition))
+			newRecallCache(db, nil, query, GetWeights(tc.intent)).beamSearchFromAnchor("root", 1, TraversalParams{BeamWidth: 2, MaxDepth: 1, MaxVisited: 3}, scores, via)
 			if _, ok := scores["gold"]; !ok {
 				t.Fatalf("best transition excluded by visit budget: scores=%v", scores)
 			}

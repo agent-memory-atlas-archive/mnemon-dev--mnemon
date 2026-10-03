@@ -41,9 +41,9 @@ func KeywordSearch(insights []*model.Insight, query string, limit int) []ScoredI
 	return keywordSearchCached(insights, query, limit, nil)
 }
 
-// keywordSearchCached is the internal implementation that optionally populates a token cache.
-// If tokenCache is non-nil, it stores each insight's combined token set keyed by ID.
-func keywordSearchCached(insights []*model.Insight, query string, limit int, tokenCache map[string]map[string]bool) []ScoredInsight {
+// keywordSearchCached is the internal implementation that optionally retains keyword scores.
+// If scoreCache is non-nil, it stores overlap scores for reranking, including zeros.
+func keywordSearchCached(insights []*model.Insight, query string, limit int, scoreCache map[string]float64) []ScoredInsight {
 	queryTokens := Tokenize(query)
 	if len(queryTokens) == 0 {
 		return nil
@@ -52,20 +52,19 @@ func keywordSearchCached(insights []*model.Insight, query string, limit int, tok
 	h := &scoredHeap{}
 	for _, ins := range insights {
 		contentTokens := insightTokens(ins)
-		if tokenCache != nil {
-			tokenCache[ins.ID] = contentTokens
-		}
-
 		intersection := 0
 		for t := range queryTokens {
 			if contentTokens[t] {
 				intersection++
 			}
 		}
+		score := float64(intersection) / float64(len(queryTokens))
+		if scoreCache != nil {
+			scoreCache[ins.ID] = score
+		}
 		if intersection == 0 {
 			continue
 		}
-		score := float64(intersection) / float64(len(queryTokens))
 
 		if limit <= 0 || h.Len() < limit {
 			heap.Push(h, ScoredInsight{Insight: ins, Score: score})
@@ -87,14 +86,10 @@ func keywordSearchCached(insights []*model.Insight, query string, limit int, tok
 func insightTokens(ins *model.Insight) map[string]bool {
 	tokens := Tokenize(ins.Content)
 	for _, tag := range ins.Tags {
-		for t := range Tokenize(tag) {
-			tokens[t] = true
-		}
+		addTokens(tokens, tag)
 	}
 	for _, ent := range ins.Entities {
-		for t := range Tokenize(ent) {
-			tokens[t] = true
-		}
+		addTokens(tokens, ent)
 	}
 	return tokens
 }
@@ -124,13 +119,19 @@ var stopwords = map[string]bool{
 // character bigrams. Common English stopwords are excluded.
 func Tokenize(text string) map[string]bool {
 	tokens := make(map[string]bool)
+	addTokens(tokens, text)
+	return tokens
+}
+
+// addTokens merges one text into an existing token set. Each field is processed
+// separately so CJK bigrams never span content/tag/entity boundaries.
+func addTokens(tokens map[string]bool, text string) {
 	text = strings.ToLower(text)
 
 	var word strings.Builder
-	runes := []rune(text)
 	var cjkBuf []rune
 
-	for _, r := range runes {
+	for _, r := range text {
 		if unicode.Is(unicode.Han, r) {
 			if word.Len() > 0 {
 				w := word.String()
@@ -167,7 +168,6 @@ func Tokenize(text string) map[string]bool {
 	if len(cjkBuf) > 0 {
 		flushCJK(cjkBuf, tokens)
 	}
-	return tokens
 }
 
 func flushCJK(buf []rune, tokens map[string]bool) {
@@ -205,8 +205,12 @@ func JaccardSimilarity(a, b string) float64 {
 // ContentSimilarity computes bidirectional token overlap between two texts.
 // Returns max(overlap_a_to_b, overlap_b_to_a) for a symmetric measure.
 func ContentSimilarity(a, b string) float64 {
-	tokA := Tokenize(a)
-	tokB := Tokenize(b)
+	return TokenOverlapSimilarity(Tokenize(a), Tokenize(b))
+}
+
+// TokenOverlapSimilarity computes the same bidirectional overlap as
+// ContentSimilarity over already-tokenized text. Neither input is modified.
+func TokenOverlapSimilarity(tokA, tokB map[string]bool) float64 {
 	if len(tokA) == 0 || len(tokB) == 0 {
 		return 0
 	}

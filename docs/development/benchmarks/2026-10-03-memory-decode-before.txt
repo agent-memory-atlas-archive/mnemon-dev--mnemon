@@ -1,0 +1,29 @@
+# Isolated vector decode buffer comparison, 2026-10-03
+# Production commit: 6d1511aca64bc9892aeee23a9e45c8f3486f98ab
+# Benchmark sources: a21d783b; Apple M4; darwin/arm64; Go 1.25.4
+# Three alternating rounds; N=10000; RecallHybrid and RecallWhy
+# -test.bench=^BenchmarkMemoryRead$/^N=10000$/^(RecallHybrid|RecallWhy)$
+# -test.run=^$ -test.benchtime=200ms -test.cpu=1 -test.benchmem
+# No other local tests ran concurrently; cumulative B/op is not peak RSS
+
+goos: darwin
+goarch: arm64
+pkg: github.com/mnemon-dev/mnemon/internal/memory
+cpu: Apple M4
+BenchmarkMemoryRead/N=10000/RecallHybrid         	       3	  67769264 ns/op	  65984000 cpu-ns/op	59354144 B/op	  916762 allocs/op
+BenchmarkMemoryRead/N=10000/RecallWhy            	       3	  68961611 ns/op	  68912667 cpu-ns/op	59414122 B/op	  919264 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/mnemon-dev/mnemon/internal/memory
+cpu: Apple M4
+BenchmarkMemoryRead/N=10000/RecallHybrid         	       3	  69582194 ns/op	  69488333 cpu-ns/op	59354224 B/op	  916763 allocs/op
+BenchmarkMemoryRead/N=10000/RecallWhy            	       3	  68606861 ns/op	  68585333 cpu-ns/op	59418562 B/op	  919419 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/mnemon-dev/mnemon/internal/memory
+cpu: Apple M4
+BenchmarkMemoryRead/N=10000/RecallHybrid         	       3	  67607722 ns/op	  67581667 cpu-ns/op	59348413 B/op	  916635 allocs/op
+BenchmarkMemoryRead/N=10000/RecallWhy            	       3	  69724722 ns/op	  68933333 cpu-ns/op	59418562 B/op	  919419 allocs/op
+PASS
