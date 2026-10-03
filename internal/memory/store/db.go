@@ -31,12 +31,17 @@ type dbExecer interface {
 	QueryRow(string, ...any) *sql.Row
 }
 
-// DB wraps the SQLite database connection.
+// DB wraps the SQLite database connection. Store operations must not run
+// concurrently with InTransaction on the same handle.
 type DB struct {
 	conn     *sql.DB
 	tx       *sql.Tx // current active transaction (nil = no transaction)
 	path     string
 	readOnly bool
+	// Lazily prepared by the active transaction, which closes them on commit
+	// or rollback. InTransaction clears both pointers before another call.
+	txInsertInsight *sql.Stmt
+	txInsertEdge    *sql.Stmt
 }
 
 // IsReadOnly returns true if the database was opened in read-only mode.
@@ -50,6 +55,25 @@ func (db *DB) execer() dbExecer {
 	return db.conn
 }
 
+// execInsert reuses compilation for repeated inserts in one transaction. The
+// caller still owns the SQL, arguments and domain validation. Outside a
+// transaction, there is no statement cache or extra connection to manage.
+func (db *DB) execInsert(prepared **sql.Stmt, query string, args ...any) error {
+	if db.tx == nil {
+		_, err := db.conn.Exec(query, args...)
+		return err
+	}
+	if *prepared == nil {
+		stmt, err := db.tx.Prepare(query)
+		if err != nil {
+			return err
+		}
+		*prepared = stmt
+	}
+	_, err := (*prepared).Exec(args...)
+	return err
+}
+
 // InTransaction runs fn inside a single SQL transaction.
 // All store methods called within fn will use the transaction automatically.
 func (db *DB) InTransaction(fn func() error) error {
@@ -61,9 +85,15 @@ func (db *DB) InTransaction(fn func() error) error {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	db.tx = tx
-	defer func() { db.tx = nil }()
+	defer func() {
+		// Also release the connection and prepared statements if fn panics.
+		// After a successful Commit this is a harmless ErrTxDone.
+		_ = tx.Rollback()
+		db.tx = nil
+		db.txInsertInsight = nil
+		db.txInsertEdge = nil
+	}()
 	if err := fn(); err != nil {
-		tx.Rollback()
 		return err
 	}
 	return tx.Commit()

@@ -13,13 +13,12 @@ func (db *DB) InsertEdge(e *model.Edge) error {
 	if e.EdgeType == model.EdgeSupersedes && e.SourceID == e.TargetID {
 		return fmt.Errorf("supersedes requires distinct insights")
 	}
-	_, err := db.execer().Exec(
+	return db.execInsert(&db.txInsertEdge,
 		`INSERT OR REPLACE INTO edges (source_id, target_id, edge_type, weight, metadata, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		e.SourceID, e.TargetID, string(e.EdgeType), e.Weight,
 		e.MetadataJSON(), e.CreatedAt.Format(time.RFC3339),
 	)
-	return err
 }
 
 // GetEdgesByNode returns all edges where the given node is source or target.
