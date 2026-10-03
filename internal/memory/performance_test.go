@@ -44,6 +44,23 @@ type memoryCorpus struct {
 	embedded []search.EmbeddedItem
 }
 
+func benchmarkMemoryOperation(b *testing.B, run func() error) {
+	b.Helper()
+	cpuStart := processCPUTime()
+	for b.Loop() {
+		if err := run(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	reportCPU(b, processCPUTime()-cpuStart)
+}
+
+func reportCPU(b *testing.B, elapsed time.Duration) {
+	if elapsed > 0 && b.N > 0 {
+		b.ReportMetric(float64(elapsed)/float64(b.N), "cpu-ns/op")
+	}
+}
+
 func newMemoryCorpus(b *testing.B, n int) memoryCorpus {
 	b.Helper()
 	db, err := store.Open(b.TempDir())
@@ -101,6 +118,11 @@ func BenchmarkMemoryRead(b *testing.B) {
 				{"SourceLatest", func() error { _, err := c.db.GetLatestInsightBySource("source-00", ""); return err }},
 				{"SourceRecent", func() error { _, err := c.db.GetRecentInsightsBySource("source-00", "", 10); return err }},
 				{"Entity", func() error { _, err := c.db.FindInsightsWithEntity("SQLite", "", 10); return err }},
+				{"EntityMiss", func() error { _, err := c.db.FindInsightsWithEntity("absent", "", 10); return err }},
+				{"RankedKeywordMiss", func() error {
+					_, err := c.db.QueryInsights(store.QueryFilter{Keyword: "absent", Limit: 10})
+					return err
+				}},
 				{"Embeddings", func() error { _, err := c.db.GetAllEmbeddings(); return err }},
 				{"Keyword", func() error { search.KeywordSearch(c.insights, query, 10); return nil }},
 				{"Diff", func() error {
@@ -127,11 +149,7 @@ func BenchmarkMemoryRead(b *testing.B) {
 			for _, tc := range cases {
 				b.Run(tc.name, func(b *testing.B) {
 					b.ReportAllocs()
-					for b.Loop() {
-						if err := tc.run(); err != nil {
-							b.Fatal(err)
-						}
-					}
+					benchmarkMemoryOperation(b, tc.run)
 				})
 			}
 		})
@@ -150,7 +168,9 @@ func BenchmarkMemoryInsert(b *testing.B) {
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
+			var cpuTotal time.Duration
 			for i := 0; i < b.N; i++ {
+				cpuStart := processCPUTime()
 				if err := c.db.InTransaction(func() error {
 					for _, ins := range insights {
 						if err := c.db.InsertInsight(ins); err != nil {
@@ -161,12 +181,71 @@ func BenchmarkMemoryInsert(b *testing.B) {
 				}); err != nil {
 					b.Fatal(err)
 				}
+				cpuTotal += processCPUTime() - cpuStart
 				b.StopTimer()
 				if _, err := c.db.Conn().Exec(`DELETE FROM insights`); err != nil {
 					b.Fatal(err)
 				}
 				b.StartTimer()
 			}
+			reportCPU(b, cpuTotal)
+		})
+	}
+}
+
+// BenchmarkMemoryMaintenance isolates store-wide metadata scans and the local
+// graph write pipeline. Existing edges are replaced on each iteration, keeping
+// the corpus size bounded; these are not provider or CLI benchmarks.
+func BenchmarkMemoryMaintenance(b *testing.B) {
+	for _, n := range corpusSizes {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			c := newMemoryCorpus(b, n)
+			b.Run("KnownEntities", func(b *testing.B) {
+				benchmarkMemoryOperation(b, func() error { _, err := c.db.LoadKnownEntities(); return err })
+			})
+			b.Run("Retention", func(b *testing.B) {
+				benchmarkMemoryOperation(b, func() error { _, _, err := c.db.GetRetentionCandidates(1, 10); return err })
+			})
+			b.Run("EngineProvided", func(b *testing.B) {
+				engine := graph.NewEngineWithEntityMode(c.db, c.vectors, graph.EntityModeProvided)
+				benchmarkMemoryOperation(b, func() error {
+					return c.db.InTransaction(func() error {
+						engine.OnInsightCreated(c.insights[0])
+						return nil
+					})
+				})
+			})
+		})
+	}
+}
+
+func BenchmarkMemoryDenseRecall(b *testing.B) {
+	for _, n := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			c := newMemoryCorpus(b, n)
+			if err := c.db.InTransaction(func() error {
+				for i, source := range c.insights {
+					for j, target := range c.insights {
+						if i == j {
+							continue
+						}
+						if err := c.db.InsertEdge(&model.Edge{
+							SourceID: source.ID, TargetID: target.ID, EdgeType: model.EdgeSemantic,
+							Weight: float64(1+(i*31+j*17)%101) / 101, CreatedAt: source.CreatedAt,
+						}); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+			queryVec := corpusVector(7)
+			benchmarkMemoryOperation(b, func() error {
+				_, err := search.IntentAwareRecall(c.db, "SQLite memory", queryVec, nil, 10, nil)
+				return err
+			})
 		})
 	}
 }
