@@ -14,23 +14,38 @@ func (db *DB) Compact() (before, after int64, err error) {
 	if db.readOnly {
 		return 0, 0, fmt.Errorf("compact: database is read-only")
 	}
-	if _, err := db.conn.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+	if err := db.compactCheckpoint(); err != nil {
 		return 0, 0, fmt.Errorf("checkpoint: %w", err)
 	}
-	before = db.fileSize()
+	before, err = db.fileSize()
+	if err != nil {
+		return 0, 0, err
+	}
 	if _, err := db.conn.Exec(`VACUUM`); err != nil {
 		return 0, 0, fmt.Errorf("vacuum: %w", err)
 	}
-	if _, err := db.conn.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return 0, 0, fmt.Errorf("checkpoint: %w", err)
+	if err := db.compactCheckpoint(); err != nil {
+		return before, 0, fmt.Errorf("vacuum completed but checkpoint failed: %w", err)
 	}
-	return before, db.fileSize(), nil
+	after, err = db.fileSize()
+	return before, after, err
 }
 
-func (db *DB) fileSize() int64 {
+func (db *DB) compactCheckpoint() error {
+	var busy, log, checkpointed int
+	if err := db.conn.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &log, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("database busy: checkpointed %d of %d WAL frames; retry after active transactions finish", checkpointed, log)
+	}
+	return nil
+}
+
+func (db *DB) fileSize() (int64, error) {
 	fi, err := os.Stat(db.path)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("stat database: %w", err)
 	}
-	return fi.Size()
+	return fi.Size(), nil
 }
