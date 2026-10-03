@@ -1,9 +1,180 @@
 # Memory algorithm performance audit
 
-Date: 2026-10-03. Production baseline: `4d312c4e`. Optimized implementation:
-`766c3965`. Work was isolated in `codex/memory-algorithm-performance`.
+Updated: 2026-10-03. Current baseline: default branch `master` at `5c98ff9c`.
+Current optimized implementation: `9393edbe`, after merging that baseline in
+`6d1511ac`. Work remains isolated in `codex/memory-algorithm-performance`.
 
 [中文报告](../zh/development/memory-algorithm-performance.md)
+
+## Revalidation against the latest master
+
+The default branch is named `master`. It now includes PR #148: covering edge
+indexes, scoped supersedes reads, a caller-loaded active-insight snapshot,
+per-recall ranked-transition caching, embedding keep-alive, mmap and database
+compaction. Those changes are retained. They are part of the **new baseline**,
+not attributed to this PR's incremental gains. The historical audit below
+preserves the earlier measurements separately.
+
+The merge preserves upstream's correctness rule: rank each complete neighborhood
+by intent-weighted structure plus cosine similarity **before** applying the visit
+budget. Transition ties still use insight ID and edge type. The request-local
+cache now retains those ranked transitions and reuses precomputed scalar cosine
+scores instead of recalculating cosine for each edge. Query and intent are fixed
+for the lifetime of that cache.
+
+An additional change reuses the vector decode buffer within a synchronous
+embedding scan. `DeserializeVector` and `DeserializeVectorInto` share one float32
+decoder; callers that need an owned vector still get one. Recall consumes each
+vector's score before the next row overwrites the buffer. The stored format,
+arithmetic order, invalid-blob behavior and query lifetime are unchanged.
+
+Against current master, both versions already make at most U successful
+neighborhood reads for U distinct expanded nodes. Let E_U be the total incident
+edges loaded, C the reranked candidates, and d the vector dimension. The cosine
+component changes from `O((N + E_U + C)d)` to `O(Nd + E_U + C)`. Both versions
+retain `O(sum(deg(v) log deg(v)))` neighborhood sorting before traversal, as
+required by the upstream budget rule. Dense neighborhoods therefore remain
+expensive; a visit budget does not bound the size of the adjacency lists read.
+
+For fixed dimension d, buffer reuse reduces cumulative temporary decoded-vector
+allocation from `O(Nd)` to `O(d)` per recall. With mixed dimensions it allocates
+only when a larger capacity is needed. This is an allocation improvement;
+exact vector comparison remains `O(Nd)`, scalar caches remain `O(N)`, and the
+reported B/op values are cumulative allocation, not peak resident memory. The
+ordered-read indexes, local BFS, semantic top-K and transaction statement reuse
+retain the bounds described in the historical audit.
+
+### Fresh measurements
+
+The fixture and methodology below are unchanged: N=1/10/100/1,000/10,000,
+128-dimensional vectors, real temporary SQLite WAL stores, Apple M4,
+Go 1.25.4, one P, five alternating rounds at 100 ms per case. The final dataset
+contains **108 cases × 5 rounds × 2 versions = 1,080 samples**. It compares
+`5c98ff9c` directly with `9393edbe`; intermediate merge-only results are excluded.
+No other local test suite ran concurrently with these measurements.
+
+CPU **µs/op**, current master → final PR, median of five runs:
+
+| Path | N=1 | N=10 | N=100 |
+|---|---:|---:|---:|
+| ByID | 10.3 → 10.3 | 10.3 → 10.4 | 10.4 → 10.6 |
+| AllActive | 11.3 → 11.2 | 33.2 → 31.2 | 262.4 → 216.6 |
+| Ranked | 22.9 → 21.4 | 45.6 → 42.3 | 50.1 → 41.4 |
+| SourceLatest | 15.9 → 14.4 | 15.9 → 14.7 | 21.0 → 14.6 |
+| SourceRecent | 23.6 → 22.7 | 24.0 → 22.9 | 45.8 → 42.9 |
+| Entity | 19.7 → 16.5 | 25.6 → 23.5 | 98.0 → 23.6 |
+| EntityMiss | 19.2 → 16.3 | 20.8 → 20.6 | 64.4 → 61.7 |
+| RankedKeywordMiss | 22.7 → 21.7 | 25.6 → 24.5 | 57.9 → 57.3 |
+| Embeddings | 6.1 → 6.5 | 14.3 → 14.6 | 91.1 → 92.0 |
+| Keyword | 4.3 → 3.4 | 37.8 → 30.2 | 361.6 → 288.7 |
+| Diff | 7.3 → 6.2 | 75.4 → 64.1 | 470.5 → 367.9 |
+| RecallKeyword | 74.4 → 72.1 | 318.3 → 302.8 | 2,699.5 → 2,450.1 |
+| RecallHybrid | 82.2 → 80.0 | 339.3 → 316.2 | 3,037.5 → 2,555.0 |
+| RecallWhy | 47.7 → 45.9 | 453.9 → 423.5 | 3,236.2 → 2,687.0 |
+| SemanticEmbedding | 11.6 → 13.4 | 54.0 → 53.5 | 70.6 → 64.0 |
+| SemanticTokens | 11.7 → 13.8 | 75.1 → 54.1 | 691.6 → 416.3 |
+| Neighborhood | 17.4 → 15.2 | 50.1 → 59.3 | 368.4 → 59.3 |
+| AtomicInsert | 75.7 → 76.6 | 278.9 → 177.5 | 2,291.2 → 1,185.3 |
+| KnownEntities | 8.0 → 8.5 | 15.8 → 16.0 | 69.5 → 69.1 |
+| Retention | 59.3 → 59.1 | 153.5 → 151.5 | 1,107.3 → 1,113.3 |
+| EngineProvided | 109.6 → 87.4 | 410.6 → 304.7 | 1,048.6 → 670.7 |
+
+At N=10,000, CPU **ms/op** (lower is better; ratio is master/final):
+
+| Path | CPU ms master → PR | CPU ratio | Allocation KiB master → PR |
+|---|---:|---:|---:|
+| ByID | 0.0100 → 0.0101 | 0.99× | 2.3 → 2.3 |
+| AllActive | 29.2625 → 20.4287 | 1.43× | 14,914.0 → 14,913.3 |
+| Ranked | 0.9576 → 0.0398 | 24.04× | 15.9 → 15.9 |
+| SourceLatest | 0.6016 → 0.0146 | 41.35× | 2.4 → 2.4 |
+| SourceRecent | 0.6606 → 0.0416 | 15.88× | 15.8 → 15.8 |
+| Entity | 13.4870 → 0.0235 | 573.77× | 1.5 → 1.5 |
+| EntityMiss | 5.5477 → 5.2305 | 1.06× | 0.6 → 0.6 |
+| RankedKeywordMiss | 4.0758 → 3.9901 | 1.02× | 1.2 → 1.3 |
+| Embeddings | 10.4085 → 9.2843 | 1.12× | 16,160.0 → 16,160.0 |
+| Keyword | 33.7453 → 26.5098 | 1.27× | 33,438.9 → 19,688.6 |
+| Diff | 36.3317 → 29.0380 | 1.25× | 35,175.5 → 20,903.8 |
+| RecallKeyword | 69.9800 → 53.5140 | 1.31× | 49,598.2 → 35,760.8 |
+| RecallHybrid | 93.0620 → 66.5310 | 1.40× | 77,004.9 → 47,945.3 |
+| RecallWhy | 91.0855 → 67.1605 | 1.36× | 77,072.3 → 48,031.3 |
+| SemanticEmbedding | 1.8507 → 0.9890 | 1.87× | 966.1 → 12.4 |
+| SemanticTokens | 72.4055 → 41.1787 | 1.76× | 42,593.3 → 22,179.5 |
+| Neighborhood | 40.3057 → 0.0595 | 677.77× | 23,425.1 → 9.3 |
+| AtomicInsert | 524.3310 → 431.6040 | 1.21× | 12,970.6 → 11,017.7 |
+| KnownEntities | 6.7086 → 6.9737 | 0.96× | 1.5 → 1.5 |
+| Retention | 170.1040 → 171.6570 | 0.99× | 20,025.9 → 20,025.9 |
+| EngineProvided | 37.8323 → 2.3085 | 16.39× | 290.8 → 51.5 |
+
+Dense graph, CPU ms/op and cumulative allocation KiB/op:
+
+| N | CPU ms master → PR | CPU ratio | Allocation KiB master → PR |
+|---|---:|---:|---:|
+| 1 | 0.0640 → 0.0633 | 1.01× | 11.1 → 9.7 |
+| 10 | 0.5254 → 0.4938 | 1.06× | 188.8 → 160.8 |
+| 100 | 18.3243 → 16.8662 | 1.09× | 5,553.8 → 5,231.4 |
+
+At N=10,000, hybrid recall allocation fell from 78.85 MB to
+49.10 MB per operation (37.7% less). Dense recall at N=100 improves
+1.09× over current master. The earlier 6.51× figure used a baseline without
+master's transition cache and covering indexes and does not describe this delta.
+
+Small inputs retain fixed-cost tradeoffs: N=10 neighborhood reads take
+59.34 µs versus 50.09 µs; N=1 semantic embedding/token paths take 13.36/13.79 µs
+versus 11.57/11.75 µs. Known-entity scanning at N=10,000 takes 6.974 ms versus
+6.709 ms (about 4% more); retention is near neutral (170.104 → 171.657 ms).
+Unmodified embedding loading also varies (10.409 → 9.284 ms), so small timing
+ratios should not be interpreted as algorithm changes. ID lookup is near neutral.
+The Entity benchmark's large gain is fixture-specific: every record has the entity, so the
+indexed read can stop after ten matches. An absent JSON entity or substring
+still requires a linear scan. These shared-host timings are observations, not
+cold-start or production latency guarantees.
+
+The isolated decode-buffer probe compared the merge commit `6d1511ac` with
+`9393edbe`: three alternating rounds, N=10,000, hybrid/WHY recall, 200 ms per
+case. Hybrid allocation fell from approximately 59.35 MB to 49.11 MB per call,
+about 17%, matching the eliminated 9,999 temporary 128-element float64 buffers.
+This probe is separate from the full master-versus-final dataset.
+
+All final samples are saved as [current master](benchmarks/2026-10-03-memory-main.txt)
+and [final PR](benchmarks/2026-10-03-memory-synced.txt). The isolated allocation
+probe is saved as [decode before](benchmarks/2026-10-03-memory-decode-before.txt)
+and [decode after](benchmarks/2026-10-03-memory-decode-after.txt).
+
+### Compatibility and validation after the merge
+
+- `go build -o mnemon .`, `make test`, and
+  `go test -race ./internal/memory/... ./cmd/memory -count=1` passed on the final
+  production implementation.
+- `MNEMON_EMBED_ENDPOINT=http://127.0.0.1:1 bash scripts/e2e_test.sh`: all
+  **258 assertions passed** after the buffer change.
+- `npm test --prefix npm/cli`: **13 passed**. The imported OpenCode runtime suite
+  and ZCode shell hooks passed locally. The Windows PowerShell hook probe was
+  skipped on this macOS host; it belongs to the manual Windows integration suite.
+- The independent full-vector traversal oracle is now copied from `5c98ff9c`.
+  Cached scores and via labels match for all four intents, three traversal
+  budgets, repeated/overlapping anchors, ties, cycles, deleted nodes, real/zero/
+  negative query vectors and mismatched dimensions. Upstream's four
+  best-transition budget regressions remain covered.
+- A shuffled caller-supplied snapshot returns the same time anchors without
+  reordering the caller's slice. Decode tests exercise growth, shrinkage,
+  invalid bytes, signed zero, subnormals, infinities and NaNs.
+- Existing index-plan/migration, bounded-BFS parity, transaction rollback/panic
+  and supersedes/compaction tests pass. Equal-score anchor/result order still
+  has the pre-existing nondeterminism; no byte-for-byte ordering claim is added.
+
+To reproduce this comparison, use the commands in the historical reproduction
+section with **`5c98ff9c` as the baseline and `9393edbe` as the optimized revision**.
+Copy the unchanged `performance*_test.go` files from `a21d783b` into the baseline
+archive, compile separate binaries and alternate their execution. Paid live
+providers, cold filesystem-cache timing and the Agency/Docker integration
+umbrella remain outside these measurements.
+
+## Historical audit: 4d312c4e → 766c3965
+
+The rest of this document records the original experiment before the master
+sync. Its timings and gains apply only to those historical revisions. In
+particular, the original 6.51× dense-recall gain is **not** the incremental gain
+over current master; use the fresh comparison above for that decision.
 
 This audit covers the native Memory read/write pipeline: SQLite retrieval,
 keyword and vector scoring, multi-signal recall, semantic candidates, bounded
@@ -12,7 +183,7 @@ daemon protocols are outside this change. There is no claim of a universally
 optimal implementation: input size, graph density, selectivity and durability
 requirements impose different costs.
 
-## What changed
+### What changed
 
 1. Replace three single-column insight indexes with indexes matching active
    timestamp, source/timestamp and importance/timestamp reads. Remove the old
@@ -47,7 +218,7 @@ order; the old code already combined unordered maps and non-stable sorts. The
 optimization does not add approximate nearest-neighbor search or discard
 low-ranked candidates before a stage that needs them for score normalization.
 
-## Complexity audit
+### Complexity audit
 
 Let **N** be active insights, **E** graph edges, **L** average text/tag/entity
 size, **d** embedding dimensions, **Q** query tokens and **K** requested results.
@@ -96,7 +267,7 @@ on the neighborhood, including missing/deleted endpoints, rather than unrelated
 history. A high-degree node can still be expensive. Unlimited BFS retains its
 bulk `O(NL + E)` loading and traversal path.
 
-## Measurement method
+### Measurement method
 
 The committed [benchmarks](../../internal/memory/performance_test.go) use real
 temporary SQLite WAL databases and synthetic local vectors. N is **corpus size**,
@@ -132,7 +303,7 @@ are used together; timing ratios are local observations, not latency promises.
 `B/op` is cumulative Go allocation per operation, **not peak RSS** or database
 file size. Three timing points alone cannot establish a Big-O bound.
 
-### N=1, 10, 100
+#### N=1, 10, 100
 
 CPU **µs/op**, before → after. Each cell is a median of five runs.
 
@@ -160,7 +331,7 @@ CPU **µs/op**, before → after. Each cell is a median of five runs.
 | Retention | 58.2 → 59.0 | 151.9 → 149.6 | 1,134.6 → 1,104.2 |
 | EngineProvided | 97.0 → 85.8 | 388.3 → 300.7 | 1,004.4 → 637.8 |
 
-### Larger corpus and allocation results
+#### Larger corpus and allocation results
 
 CPU **ms/op**, before → after; allocation is **KiB/op** at N=10,000. Speedup is before CPU / after CPU, not a throughput SLA.
 
@@ -188,7 +359,7 @@ CPU **ms/op**, before → after; allocation is **KiB/op** at N=10,000. Speedup i
 | Retention | 11.675 → 11.813 | 184.412 → 185.037 | 1.00× | 20,025.9 → 20,025.9 |
 | EngineProvided | 3.369 → 0.814 | 56.044 → 2.029 | 27.62× | 290.9 → 51.4 |
 
-### Dense graph and unchanged controls
+#### Dense graph and unchanged controls
 
 | Dense recall | CPU ms/op, before → after | CPU speedup | KiB/op, before → after |
 |---|---:|---:|---:|
@@ -221,7 +392,7 @@ saved as [before](benchmarks/2026-10-03-memory-before.txt) and
 [after](benchmarks/2026-10-03-memory-after.txt). No exploratory or superseded
 implementation measurements are mixed into these files.
 
-## Correctness and verification
+### Correctness and verification
 
 - `go build -o mnemon .` — passed.
 - `make test` — passed, including vet, deterministic tests and architecture
@@ -245,7 +416,7 @@ run; these changes do not modify those boundaries. The Memory CLI boundary was
 exercised directly. The changes do not add goroutines or change transaction
 commit policy, supersession authority or exact-duplicate write suppression.
 
-## Reproduce
+### Reproduce
 
 On the PR revision:
 
@@ -265,7 +436,7 @@ with `-test.run='^$' -test.bench=BenchmarkMemory -test.benchmem
 rounds. Compare medians of the identically named cases. Do not run other test
 suites concurrently with the measurements.
 
-## Remaining limits
+### Remaining limits
 
 Exact keyword/vector matching, JSON entity misses and retention still have
 whole-corpus work. Persistent token/entity indexes would need their own
