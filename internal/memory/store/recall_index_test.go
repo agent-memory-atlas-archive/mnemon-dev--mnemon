@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -68,10 +69,9 @@ func TestRecallEdgeQueries_UseCoveringIndexes(t *testing.T) {
 	if strings.Count(plan, "COVERING INDEX") != 2 {
 		t.Fatalf("neighbour query not answered from covering indexes:\n%s", plan)
 	}
-	plan = queryPlan(t, db, `SELECT target_id FROM edges INDEXED BY idx_edges_supersedes
-		 WHERE edge_type = 'supersedes' AND source_id != target_id`)
-	if !strings.Contains(plan, "COVERING INDEX idx_edges_supersedes") {
-		t.Fatalf("superseded lookup is not answered from the partial index alone:\n%s", plan)
+	plan = queryPlan(t, db, fmt.Sprintf(supersededLookupSQL, "?,?"), "first", "second")
+	if !strings.Contains(plan, "SEARCH edges USING COVERING INDEX idx_edges_supersedes (target_id=?)") || strings.Contains(plan, "SCAN edges") {
+		t.Fatalf("superseded lookup must seek requested targets in the partial index:\n%s", plan)
 	}
 }
 
