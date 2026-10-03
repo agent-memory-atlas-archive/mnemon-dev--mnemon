@@ -136,6 +136,12 @@ ZCode 会将 Mnemon skill 安装到 `~/.zcode/skills/`，并在
 模型调用前会收到 recall 指引，停止时会评估 durable-memory 回写。不加
 `--global` 时只安装项目 skill，因为 ZCode 当前不会执行项目级 hooks 配置。
 
+Stop hook 优先检查 `stop_hook_active`，避免重复提醒。完成标记兼容 `mnemon`、
+`durable memory`、`持久记忆` 和 `写入记忆`；提醒会要求在评估结果中包含
+`[mnemon]`，以支持任意语言。Windows hooks 显式以 UTF-8 解码 stdin，含中文
+标记的 PowerShell 脚本带 UTF-8 BOM，以兼容 Windows PowerShell 5.1。
+重新运行 setup 并开启新的 ZCode 会话，即可更新已安装的 hooks。
+
 ### [MiniMax Code](https://github.com/MiniMax-AI/minimax-code)
 
 ```bash

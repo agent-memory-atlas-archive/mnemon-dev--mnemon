@@ -14,7 +14,7 @@ if payload.get("stop_hook_active"):
     sys.exit(0)
 
 last_message = (payload.get("last_assistant_message") or "").lower()
-if "mnemon" in last_message or "durable memory" in last_message:
+if any(token in last_message for token in ("mnemon", "durable memory", "持久记忆", "写入记忆")):
     sys.exit(0)
 
 print(json.dumps({
@@ -22,7 +22,8 @@ print(json.dumps({
     "reason": (
         "[mnemon] Briefly evaluate whether this exchange warrants durable memory. "
         "If yes, use the mnemon skill/CLI to remember only durable, non-secret facts; "
-        "otherwise say no durable memory is needed."
+        "otherwise say no durable memory is needed. "
+        "Include [mnemon] in your evaluation, in any language."
     ),
 }))
 '
