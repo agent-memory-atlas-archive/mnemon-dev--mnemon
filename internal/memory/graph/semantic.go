@@ -2,10 +2,10 @@ package graph
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/mnemon-dev/mnemon/internal/memory/embed"
+	"github.com/mnemon-dev/mnemon/internal/memory/internal/topk"
 	"github.com/mnemon-dev/mnemon/internal/memory/model"
 	"github.com/mnemon-dev/mnemon/internal/memory/search"
 	"github.com/mnemon-dev/mnemon/internal/memory/store"
@@ -70,30 +70,9 @@ func CreateSemanticEdges(db *store.DB, insight *model.Insight, embedCache EmbedC
 		return 0
 	}
 
-	type scored struct {
-		id         string
-		similarity float64
-	}
-	var candidates []scored
-	for id, otherVec := range embedCache {
-		if id == insight.ID {
-			continue
-		}
-		cosSim := embed.CosineSimilarity(insightVec, otherVec)
-		if cosSim >= autoSemanticThreshold {
-			candidates = append(candidates, scored{id: id, similarity: cosSim})
-		}
-	}
-
+	candidates := semanticTopK(embedCache, insight.ID, insightVec, autoSemanticThreshold, maxAutoSemanticEdges)
 	if len(candidates) == 0 {
 		return 0
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].similarity > candidates[j].similarity
-	})
-	if len(candidates) > maxAutoSemanticEdges {
-		candidates = candidates[:maxAutoSemanticEdges]
 	}
 
 	now := time.Now().UTC()
@@ -151,32 +130,9 @@ func findCandidatesByEmbedding(db *store.DB, insight *model.Insight, embedCache 
 		return nil
 	}
 
-	type scored struct {
-		id         string
-		similarity float64
-	}
-
-	var candidates []scored
-	for id, otherVec := range embedCache {
-		if id == insight.ID {
-			continue
-		}
-		cosSim := embed.CosineSimilarity(insightVec, otherVec)
-		if cosSim >= reviewSemanticThreshold {
-			candidates = append(candidates, scored{id: id, similarity: cosSim})
-		}
-	}
-
+	candidates := semanticTopK(embedCache, insight.ID, insightVec, reviewSemanticThreshold, maxSemanticCandidates)
 	if len(candidates) == 0 {
 		return nil
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].similarity > candidates[j].similarity
-	})
-
-	if len(candidates) > maxSemanticCandidates {
-		candidates = candidates[:maxSemanticCandidates]
 	}
 
 	result := make([]SemanticCandidate, 0, len(candidates))
@@ -211,24 +167,18 @@ func findCandidatesByTokenOverlap(db *store.DB, insight *model.Insight) []Semant
 		similarity float64
 	}
 
-	var candidates []scored
+	best := topk.New(maxSemanticCandidates, func(a, b scored) bool { return a.similarity > b.similarity })
+	queryTokens := search.Tokenize(insight.Content)
 	for _, other := range all {
 		if other.ID == insight.ID {
 			continue
 		}
-		sim := search.ContentSimilarity(insight.Content, other.Content)
+		sim := search.TokenOverlapSimilarity(queryTokens, search.Tokenize(other.Content))
 		if sim >= minSemanticSimilarity {
-			candidates = append(candidates, scored{insight: other, similarity: sim})
+			best.Add(scored{insight: other, similarity: sim})
 		}
 	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].similarity > candidates[j].similarity
-	})
-
-	if len(candidates) > maxSemanticCandidates {
-		candidates = candidates[:maxSemanticCandidates]
-	}
+	candidates := best.Sorted()
 
 	result := make([]SemanticCandidate, len(candidates))
 	for i, c := range candidates {
@@ -240,4 +190,25 @@ func findCandidatesByTokenOverlap(db *store.DB, insight *model.Insight) []Semant
 		}
 	}
 	return result
+}
+
+type semanticScore struct {
+	id         string
+	similarity float64
+}
+
+// semanticTopK performs exact cosine scoring, keeping only the bounded output.
+// Filtering active/missing candidates still occurs after selection, preserving
+// the caller's existing fallback and edge-write behavior.
+func semanticTopK(cache EmbedCache, excludeID string, vec []float64, threshold float64, limit int) []semanticScore {
+	best := topk.New(limit, func(a, b semanticScore) bool { return a.similarity > b.similarity })
+	for id, other := range cache {
+		if id == excludeID {
+			continue
+		}
+		if sim := embed.CosineSimilarity(vec, other); sim >= threshold {
+			best.Add(semanticScore{id: id, similarity: sim})
+		}
+	}
+	return best.Sorted()
 }

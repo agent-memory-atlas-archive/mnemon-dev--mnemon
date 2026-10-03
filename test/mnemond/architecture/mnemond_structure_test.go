@@ -68,15 +68,16 @@ func assertNativeMemoryDoesNotImportAgency(t *testing.T, root string) {
 func assertMnemondPackageGraph(t *testing.T, root string) {
 	t.Helper()
 	want := map[string][]string{
-		"internal/memory/embed":       {},
-		"internal/memory/model":       {},
-		"internal/memory/importdraft": {"internal/memory/model"},
-		"internal/memory/store":       {"internal/memory/embed", "internal/memory/model"},
+		"internal/memory/embed":         {},
+		"internal/memory/internal/topk": {},
+		"internal/memory/model":         {},
+		"internal/memory/importdraft":   {"internal/memory/model"},
+		"internal/memory/store":         {"internal/memory/embed", "internal/memory/model"},
 		"internal/memory/search": {
-			"internal/memory/embed", "internal/memory/model", "internal/memory/store",
+			"internal/memory/embed", "internal/memory/internal/topk", "internal/memory/model", "internal/memory/store",
 		},
 		"internal/memory/graph": {
-			"internal/memory/embed", "internal/memory/model", "internal/memory/search",
+			"internal/memory/embed", "internal/memory/internal/topk", "internal/memory/model", "internal/memory/search",
 			"internal/memory/store",
 		},
 		"internal/memory/setup/assets": {},

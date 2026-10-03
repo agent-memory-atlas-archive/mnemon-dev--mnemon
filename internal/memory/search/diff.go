@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mnemon-dev/mnemon/internal/memory/embed"
+	"github.com/mnemon-dev/mnemon/internal/memory/internal/topk"
 	"github.com/mnemon-dev/mnemon/internal/memory/model"
 )
 
@@ -109,24 +110,18 @@ func Diff(insights []*model.Insight, newContent string, opts DiffOptions) DiffRe
 			id  string
 			sim float64
 		}
-		var topCosine []cosinePair
+		best := topk.New(opts.Limit, func(a, b cosinePair) bool { return a.sim > b.sim })
 		for _, ei := range opts.ExistingEmbed {
 			if seen[ei.ID] {
 				continue
 			}
 			cs := embed.CosineSimilarity(opts.NewEmbedding, ei.Embedding)
 			if cs >= 0.7 { // only consider meaningfully similar items
-				topCosine = append(topCosine, cosinePair{ei.ID, cs})
+				best.Add(cosinePair{ei.ID, cs})
 			}
 		}
 
-		// Sort by cosine descending, take up to opts.Limit
-		sort.Slice(topCosine, func(i, j int) bool {
-			return topCosine[i].sim > topCosine[j].sim
-		})
-		if len(topCosine) > opts.Limit {
-			topCosine = topCosine[:opts.Limit]
-		}
+		topCosine := best.Sorted()
 
 		// Look up full insight for cosine-only matches
 		insightMap := make(map[string]*model.Insight, len(insights))

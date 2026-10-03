@@ -821,7 +821,7 @@ func (db *DB) ScanEmbeddings(fn func(id string, blob []byte) bool) error {
 			}
 		}
 	}
-	return nil
+	return rows.Err()
 }
 
 // EmbeddingStats returns total insights and how many have embeddings.
