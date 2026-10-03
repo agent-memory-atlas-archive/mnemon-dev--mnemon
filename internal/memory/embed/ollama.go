@@ -31,21 +31,27 @@ const DefaultModel = "nomic-embed-text"
 // DefaultEndpoint is the default Ollama API endpoint.
 const DefaultEndpoint = "http://localhost:11434"
 
+// DefaultKeepAlive is how long Ollama keeps the embedding model loaded after
+// a request. Ollama's own five-minute default lets a large embedding model
+// unload between agent turns, and reloading it costs seconds on a cold recall.
+const DefaultKeepAlive = "30m"
+
 // Client communicates with an embedding server (an Ollama instance or an
 // OpenAI-compatible server) for embedding generation.
 type Client struct {
-	endpoint string
-	model    string
-	dims     int // 0 means use native dimensions
-	apiKey   string
-	protocol Protocol
-	http     *http.Client
+	endpoint  string
+	model     string
+	dims      int // 0 means use native dimensions
+	apiKey    string
+	keepAlive string
+	protocol  Protocol
+	http      *http.Client
 }
 
 // NewClient creates an embedding client.
 // It checks MNEMON_EMBED_ENDPOINT, MNEMON_EMBED_MODEL,
-// MNEMON_EMBED_DIMENSIONS, MNEMON_EMBED_API_KEY, and
-// MNEMON_EMBED_PROTOCOL env vars.
+// MNEMON_EMBED_DIMENSIONS, MNEMON_EMBED_API_KEY, MNEMON_EMBED_KEEP_ALIVE,
+// and MNEMON_EMBED_PROTOCOL env vars.
 func NewClient() *Client {
 	return NewClientWithModel("")
 }
@@ -75,6 +81,10 @@ func NewClientWithModel(model string) *Client {
 			dims = v
 		}
 	}
+	keepAlive := os.Getenv("MNEMON_EMBED_KEEP_ALIVE")
+	if keepAlive == "" {
+		keepAlive = DefaultKeepAlive
+	}
 	protocol := ProtocolOllama
 	explicit := false
 	if p := os.Getenv("MNEMON_EMBED_PROTOCOL"); p != "" {
@@ -97,11 +107,12 @@ func NewClientWithModel(model string) *Client {
 		}
 	}
 	return &Client{
-		endpoint: endpoint,
-		model:    model,
-		dims:     dims,
-		apiKey:   os.Getenv("MNEMON_EMBED_API_KEY"),
-		protocol: protocol,
+		endpoint:  endpoint,
+		model:     model,
+		dims:      dims,
+		apiKey:    os.Getenv("MNEMON_EMBED_API_KEY"),
+		keepAlive: keepAlive,
+		protocol:  protocol,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -216,6 +227,9 @@ func (c *Client) embedWithContext(ctx context.Context, text string) ([]float64, 
 	if c.dims > 0 {
 		req.Dimensions = c.dims
 	}
+	if c.protocol == ProtocolOllama {
+		req.KeepAlive = c.keepAlive
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -267,6 +281,7 @@ type embedRequest struct {
 	Model      string `json:"model"`
 	Input      string `json:"input"`
 	Dimensions int    `json:"dimensions,omitempty"`
+	KeepAlive  string `json:"keep_alive,omitempty"`
 }
 
 type ollamaEmbedResponse struct {
@@ -288,8 +303,8 @@ func (c *Client) embedRequestRoute() string {
 }
 
 // Embed generates an embedding vector for the given text.
-// The request body is identical for both protocols; only the endpoint
-// path and the response shape differ.
+// The request body is identical for both protocols apart from Ollama's
+// keep_alive; the endpoint path and the response shape differ.
 func (c *Client) Embed(text string) ([]float64, error) {
 	return c.embedWithContext(context.Background(), text)
 }

@@ -39,24 +39,54 @@ func (db *DB) GetEdgesByNode(nodeID string) ([]*model.Edge, error) {
 	return scanEdges(rows)
 }
 
+// GetNeighborEdges returns every edge touching nodeID with the columns beam
+// search scores on (metadata and created_at are left zero). Both halves are
+// answered from covering indexes in a fixed store order. Recall ranks the full
+// intent and similarity transition score before applying its visit budget.
+func (db *DB) GetNeighborEdges(nodeID string) ([]*model.Edge, error) {
+	rows, err := db.execer().Query(
+		`SELECT source_id, target_id, edge_type, weight FROM edges WHERE source_id = ?
+		 UNION ALL
+		 SELECT source_id, target_id, edge_type, weight FROM edges WHERE target_id = ? AND source_id != ?
+		 ORDER BY weight DESC, source_id, target_id, edge_type`,
+		nodeID, nodeID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []*model.Edge
+	for rows.Next() {
+		var e model.Edge
+		var edgeType string
+		if err := rows.Scan(&e.SourceID, &e.TargetID, &edgeType, &e.Weight); err != nil {
+			return nil, err
+		}
+		e.EdgeType = model.EdgeType(edgeType)
+		results = append(results, &e)
+	}
+	return results, rows.Err()
+}
+
+// GetSupersededIDs checks only the requested targets, using the covering partial
+// index when available. A store can accumulate an unbounded supersession history;
+// unrelated history must not be scanned for a small recall candidate set.
+// Read-only legacy stores without the partial index retain the scoped fallback.
+func (db *DB) GetSupersededIDs(ids []string) (map[string]bool, error) {
+	return scopedSupersededIDs(db.execer(), ids)
+}
+
 // supersededLookupChunk bounds how many ids go into one IN clause. SQLite's
 // host-parameter ceiling is 32766 on current builds and 999 on older ones;
 // 500 stays inside both. Recall's candidate set is normally far smaller, so
 // the loop below runs once.
 const supersededLookupChunk = 500
 
-// GetSupersededIDs returns which of the given ids are the target of at least
-// one 'supersedes' edge, i.e. which of them some other insight claims to
-// replace. Recall uses this to demote stale content; the rows are kept so the
-// lineage stays inspectable.
-//
-// The lookup is scoped to the ids the caller holds. Reading every supersedes
-// edge in the store would cost time proportional to its whole supersession
-// history on a path that only needs a verdict for the current candidates,
-// and idx_edges_target_type answers the scoped form from the index.
-func (db *DB) GetSupersededIDs(ids []string) (map[string]bool, error) {
+const supersededLookupSQL = `SELECT DISTINCT target_id FROM edges INDEXED BY idx_edges_supersedes
+	WHERE edge_type = 'supersedes' AND source_id != target_id AND target_id IN (%s)`
+
+// scopedSupersededIDs bounds each query to the SQLite parameter limit.
+func scopedSupersededIDs(ex dbExecer, ids []string) (map[string]bool, error) {
 	superseded := make(map[string]bool)
-	ex := db.execer()
 	for start := 0; start < len(ids); start += supersededLookupChunk {
 		end := min(start+supersededLookupChunk, len(ids))
 		if err := collectSupersededIDs(ex, ids[start:end], superseded); err != nil {
@@ -70,18 +100,18 @@ func (db *DB) GetSupersededIDs(ids []string) (map[string]bool, error) {
 // are closed before returning: the pool holds a single connection, so an open
 // cursor would block the next batch.
 func collectSupersededIDs(ex dbExecer, chunk []string, into map[string]bool) error {
-	args := make([]any, 0, len(chunk)+1)
-	args = append(args, string(model.EdgeSupersedes))
+	args := make([]any, 0, len(chunk))
 	placeholders := make([]string, len(chunk))
 	for i, id := range chunk {
 		placeholders[i] = "?"
 		args = append(args, id)
 	}
 
-	rows, err := ex.Query(fmt.Sprintf(
-		`SELECT DISTINCT target_id FROM edges
-		 WHERE edge_type = ? AND source_id != target_id AND target_id IN (%s)`,
-		strings.Join(placeholders, ",")), args...)
+	query := fmt.Sprintf(supersededLookupSQL, strings.Join(placeholders, ","))
+	rows, err := ex.Query(query, args...)
+	if err != nil && strings.Contains(err.Error(), "no such index: idx_edges_supersedes") {
+		rows, err = ex.Query(strings.Replace(query, " INDEXED BY idx_edges_supersedes", "", 1), args...)
+	}
 	if err != nil {
 		return err
 	}

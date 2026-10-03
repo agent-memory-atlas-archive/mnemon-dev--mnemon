@@ -129,6 +129,18 @@ type RecallResult struct {
 // 6. Sparse hint detection
 func IntentAwareRecall(db *store.DB, query string, queryVec []float64,
 	queryEntities []string, limit int, intentOverride *Intent) (RecallResponse, error) {
+	all, err := db.GetAllActiveInsights()
+	if err != nil {
+		return RecallResponse{}, err
+	}
+	return IntentAwareRecallFrom(db, all, query, queryVec, queryEntities, limit, intentOverride)
+}
+
+// IntentAwareRecallFrom is IntentAwareRecall over a caller-loaded snapshot of
+// the active insights, so a caller that already scanned them (for example to
+// build the known-entity set) does not scan the table twice.
+func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, queryVec []float64,
+	queryEntities []string, limit int, intentOverride *Intent) (RecallResponse, error) {
 
 	// Step 1: Intent determination
 	var intent Intent
@@ -143,10 +155,9 @@ func IntentAwareRecall(db *store.DB, query string, queryVec []float64,
 	weights := GetWeights(intent)
 	params := getTraversalParams(intent)
 
-	// Get all active insights
-	all, err := db.GetAllActiveInsights()
-	if err != nil {
-		return RecallResponse{}, err
+	activeByID := make(map[string]*model.Insight, len(all))
+	for _, ins := range all {
+		activeByID[ins.ID] = ins
 	}
 
 	// Pre-load all embeddings once (avoids N+1 queries in beam search and reranking).
@@ -257,9 +268,11 @@ func IntentAwareRecall(db *store.DB, query string, queryVec []float64,
 		insightMap[id] = a.insight
 	}
 
-	// Step 3: Beam search from each anchor
+	// Step 3: Beam search from each anchor. Anchors' neighbourhoods overlap
+	// heavily, so each node's edges are read from the store once per recall.
+	edgeCache := make(map[string][]recallTransition)
 	for id, a := range anchorMap {
-		beamSearchFromAnchor(db, id, a.score, queryVec, weights, params, scoreMap, viaMap, insightMap, embedCache)
+		beamSearchFromAnchor(db, id, a.score, queryVec, weights, params, scoreMap, viaMap, insightMap, embedCache, activeByID, edgeCache)
 	}
 
 	traversedCount := len(scoreMap)
@@ -508,6 +521,9 @@ func causalTopologicalSort(db *store.DB, results []RecallResult) []RecallResult 
 // beamSearchFromAnchor performs beam search starting from a single anchor node.
 // It uses a priority queue to keep the top beamWidth candidates at each depth level.
 // embedCache provides pre-loaded embedding vectors (nil = no embeddings).
+// activeByID resolves neighbours without a query; a neighbour missing from it
+// is soft-deleted and never enters insightMap. edgeCache memoises scored edge
+// transitions across anchors within one recall.
 func beamSearchFromAnchor(
 	db *store.DB,
 	startID string,
@@ -519,6 +535,8 @@ func beamSearchFromAnchor(
 	viaMap map[string]string,
 	insightMap map[string]*model.Insight,
 	embedCache map[string][]float64,
+	activeByID map[string]*model.Insight,
+	edgeCache map[string][]recallTransition,
 ) {
 	visited := map[string]bool{startID: true}
 	totalVisited := 1
@@ -545,41 +563,29 @@ func beamSearchFromAnchor(
 				break
 			}
 
-			edges, err := db.GetEdgesByNode(cur.id)
-			if err != nil {
-				continue
+			transitions, cached := edgeCache[cur.id]
+			if !cached {
+				edges, err := db.GetNeighborEdges(cur.id)
+				if err != nil {
+					continue
+				}
+				transitions = rankRecallTransitions(cur.id, edges, queryVec, weights, embedCache)
+				edgeCache[cur.id] = transitions
 			}
 
-			for _, e := range edges {
+			for _, transition := range transitions {
 				if totalVisited >= params.MaxVisited {
 					break
 				}
-				neighborID := e.TargetID
-				if neighborID == cur.id {
-					neighborID = e.SourceID
-				}
-
-				// MAGMA transition score (P6): additive accumulation
-				// score_v = score_u + λ₁·φ(edgeType, intent) + λ₂·sim(v_neighbor, v_query)
-				structural := weights[e.EdgeType] * e.Weight // φ(edgeType, intent) * edge_weight
-				semantic := 0.0
-				if queryVec != nil && embedCache != nil {
-					if nVec, ok := embedCache[neighborID]; ok {
-						cosSim := embed.CosineSimilarity(queryVec, nVec)
-						if cosSim > 0 {
-							semantic = cosSim
-						}
-					}
-				}
-				neighborScore := cur.score + lambda1*structural + lambda2*semantic
+				neighborID := transition.id
+				neighborScore := cur.score + transition.delta
 
 				// Update global score map if this path is better
 				if existing, ok := scoreMap[neighborID]; !ok || neighborScore > existing {
 					scoreMap[neighborID] = neighborScore
-					viaMap[neighborID] = string(e.EdgeType)
+					viaMap[neighborID] = string(transition.edgeType)
 					if _, loaded := insightMap[neighborID]; !loaded {
-						ins, err := db.GetInsightByID(neighborID)
-						if err == nil && ins != nil {
+						if ins, ok := activeByID[neighborID]; ok {
 							insightMap[neighborID] = ins
 						}
 					}
