@@ -160,6 +160,14 @@ sessions, add recall guidance before model calls, and prompt for durable-memory
 writeback at stop. Without `--global`, setup installs only the project skill;
 ZCode currently ignores project-level hook configuration.
 
+The Stop hook honors `stop_hook_active` to avoid repeated reminders. Its
+completion fallback recognizes `mnemon`, `durable memory`, `持久记忆`, and
+`写入记忆`; the reminder asks for a `[mnemon]` marker so evaluations in any
+language can finish without another reminder. Windows hooks decode stdin as
+UTF-8, and the PowerShell script containing Chinese tokens includes a UTF-8 BOM
+for Windows PowerShell 5.1. Re-run setup and start a new ZCode session to update
+previously installed hooks.
+
 ### [MiniMax Code](https://github.com/MiniMax-AI/minimax-code)
 
 ```bash

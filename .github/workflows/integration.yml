@@ -2,6 +2,14 @@ name: Manual Integration
 
 on:
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Integration suite to run
+        type: choice
+        default: all
+        options:
+          - all
+          - zcode-windows
 
 permissions:
   contents: read
@@ -12,6 +20,7 @@ concurrency:
 
 jobs:
   verify:
+    if: inputs.suite != 'zcode-windows'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -29,3 +38,28 @@ jobs:
 
       - name: Run integration suite
         run: make test-integration
+
+  zcode-windows:
+    if: inputs.suite == 'all' || inputs.suite == 'zcode-windows'
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build Windows Memory product
+        run: go build -o mnemon.exe .
+
+      - name: Test installed ZCode hooks in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $env:MNEMON_TEST_BIN = (Resolve-Path ./mnemon.exe).Path
+          go test ./test/memory/zcode -v -count=1
