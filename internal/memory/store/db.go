@@ -261,6 +261,7 @@ func OpenReadOnly(dataDir string) (*DB, error) {
 	query.Set("mode", "ro")
 	query.Set("immutable", "1")
 	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "mmap_size(268435456)")
 	dsn.RawQuery = query.Encode()
 
 	conn, err := sql.Open("sqlite", dsn.String())
@@ -278,7 +279,9 @@ func Open(dataDir string) (*DB, error) {
 	}
 
 	dbPath := filepath.Join(dataDir, "mnemon.db")
-	conn, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	// mmap lets cold reads skip a syscall and a copy per page; recall's random
+	// edge and insight reads are where a cold open spends its time.
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=mmap_size(268435456)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -349,8 +352,6 @@ CREATE INDEX IF NOT EXISTS idx_insights_active_ranked ON insights(deleted_at, im
 DROP INDEX IF EXISTS idx_insights_importance;
 DROP INDEX IF EXISTS idx_insights_created;
 DROP INDEX IF EXISTS idx_insights_source;
-CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
-CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
 CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(edge_type);
 CREATE INDEX IF NOT EXISTS idx_edges_source_type ON edges(source_id, edge_type);
 CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_id, edge_type);
@@ -436,6 +437,10 @@ CREATE INDEX IF NOT EXISTS idx_oplog_created ON oplog(created_at);
 		return fmt.Errorf("add supersedes edge type: %w", err)
 	}
 
+	if err := db.migrateEdgeRecallIndexes(); err != nil {
+		return fmt.Errorf("edge recall indexes: %w", err)
+	}
+
 	// One-time cleanup: soft-delete narrative category insights from legacy databases.
 	// Only runs the UPDATE when narrative insights actually exist (avoids needless writes).
 	var narrativeCount int
@@ -446,6 +451,31 @@ CREATE INDEX IF NOT EXISTS idx_oplog_created ON oplog(created_at);
 		}
 	}
 
+	return nil
+}
+
+// migrateEdgeRecallIndexes gives recall's hot edge queries indexes that answer
+// them without touching the edges table. Beam search reads every edge of each
+// visited node; with single-column indexes each hit was a random read into the
+// table, which dominates a cold-cache recall on a large graph. The covering
+// indexes supersede the single-column ones (the (id, edge_type) indexes still
+// serve plain id lookups), so those are dropped; the table-rebuild migrations
+// above recreate them, hence this runs last on every open.
+//
+// The partial index holds only 'supersedes' edges, so recall's superseded
+// check reads a few hundred KB instead of probing the whole target index.
+func (db *DB) migrateEdgeRecallIndexes() error {
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_edges_source_cover ON edges(source_id, target_id, edge_type, weight)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_target_cover ON edges(target_id, source_id, edge_type, weight)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_supersedes ON edges(target_id, source_id) WHERE edge_type = 'supersedes'`,
+		`DROP INDEX IF EXISTS idx_edges_source`,
+		`DROP INDEX IF EXISTS idx_edges_target`,
+	} {
+		if _, err := db.conn.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
 	return nil
 }
 

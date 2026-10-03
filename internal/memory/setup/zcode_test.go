@@ -1,11 +1,51 @@
 package setup
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/mnemon-dev/mnemon/internal/memory/setup/assets"
 )
+
+func TestZCodePowerShellHookEncoding(t *testing.T) {
+	bom := []byte{0xef, 0xbb, 0xbf}
+	for _, hook := range []struct {
+		name string
+		body []byte
+	}{
+		{"prime.ps1", assets.ZCodePrimeHookPowerShell},
+		{"user_prompt.ps1", assets.ZCodeUserPromptHookPowerShell},
+		{"stop.ps1", assets.ZCodeStopHookPowerShell},
+	} {
+		t.Run(hook.name, func(t *testing.T) {
+			if !utf8.Valid(hook.body) {
+				t.Fatal("PowerShell asset is not valid UTF-8")
+			}
+			// Windows PowerShell 5.1 reads BOM-less script source as ANSI.
+			// Any asset with non-ASCII literals must carry its own UTF-8 BOM.
+			for _, b := range bytes.TrimPrefix(hook.body, bom) {
+				if b >= utf8.RuneSelf && !bytes.HasPrefix(hook.body, bom) {
+					t.Fatal("non-ASCII PowerShell source requires a UTF-8 BOM")
+				}
+			}
+			path, err := ZCodeWriteHook(t.TempDir(), hook.name, hook.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installed, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(installed, hook.body) {
+				t.Fatal("setup changed the embedded PowerShell bytes")
+			}
+		})
+	}
+}
 
 func TestZCodeRegisterHooksPreservesUnrelatedConfig(t *testing.T) {
 	dir := t.TempDir()

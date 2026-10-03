@@ -11,14 +11,15 @@ import (
 type recallCache struct {
 	db           *store.DB
 	insights     map[string]*model.Insight
-	edges        map[string][]*model.Edge
+	transitions  map[string][]recallTransition
+	weights      IntentWeights
 	similarities map[string]float64
 }
 
-func newRecallCache(db *store.DB, all []*model.Insight, queryVec []float64) *recallCache {
+func newRecallCache(db *store.DB, all []*model.Insight, queryVec []float64, weights IntentWeights) *recallCache {
 	c := &recallCache{
 		db: db, insights: make(map[string]*model.Insight, len(all)),
-		edges: make(map[string][]*model.Edge),
+		transitions: make(map[string][]recallTransition), weights: weights,
 	}
 	for _, ins := range all {
 		c.insights[ins.ID] = ins
@@ -29,16 +30,20 @@ func newRecallCache(db *store.DB, all []*model.Insight, queryVec []float64) *rec
 	return c
 }
 
-func (c *recallCache) edgesFor(id string) ([]*model.Edge, error) {
-	if edges, ok := c.edges[id]; ok {
-		return edges, nil
+// transitionsFor keeps the complete intent-ranked neighborhood, as upstream
+// requires before applying the per-anchor visit budget. Query and intent are
+// fixed for this cache, so both ordering and deltas can be reused across anchors.
+func (c *recallCache) transitionsFor(id string) ([]recallTransition, error) {
+	if transitions, ok := c.transitions[id]; ok {
+		return transitions, nil
 	}
-	edges, err := c.db.GetEdgesByNode(id)
-	if err == nil {
-		// Retain empty adjacency lists too, but let failed reads be retried.
-		c.edges[id] = edges
+	edges, err := c.db.GetNeighborEdges(id)
+	if err != nil {
+		return nil, err // Failed reads may be retried by another anchor.
 	}
-	return edges, err
+	transitions := rankRecallTransitions(id, edges, c.weights, c.similarities)
+	c.transitions[id] = transitions // Retain empty neighborhoods too.
+	return transitions, nil
 }
 
 func loadQuerySimilarities(db *store.DB, queryVec []float64) map[string]float64 {

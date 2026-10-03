@@ -28,10 +28,13 @@ func TestCachedBeamMatchesReference(t *testing.T) {
 		}
 	}
 	types := []model.EdgeType{model.EdgeTemporal, model.EdgeSemantic, model.EdgeCausal, model.EdgeEntity}
-	for range 120 {
+	for i := range 120 {
 		e := &model.Edge{
 			SourceID: fmt.Sprintf("n-%02d", rng.Intn(n)), TargetID: fmt.Sprintf("n-%02d", rng.Intn(n)),
 			EdgeType: types[rng.Intn(len(types))], Weight: rng.Float64(), CreatedAt: now,
+		}
+		if i%3 == 0 {
+			e.Weight = 0.5 // Exercise upstream's deterministic transition tie ordering.
 		}
 		if err := db.InsertEdge(e); err != nil {
 			t.Fatal(err)
@@ -47,16 +50,21 @@ func TestCachedBeamMatchesReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, queryVec := range [][]float64{nil, {0.1, 0.5, 0.9}, {1, 0}} {
+	for _, queryVec := range [][]float64{nil, {0.1, 0.5, 0.9}, {1, 0}, {0, 0, 0}, {-0.1, -0.5, -0.9}} {
 		for _, intent := range []Intent{IntentGeneral, IntentWhy, IntentWhen, IntentEntity} {
 			for _, params := range []TraversalParams{{1, 1, 2}, {3, 4, 12}, {10, 5, 100}} {
-				cache := newRecallCache(db, all, queryVec)
+				cache := newRecallCache(db, all, queryVec, GetWeights(intent))
 				gotScores, wantScores := map[string]float64{}, map[string]float64{}
 				gotVia, wantVia := map[string]string{}, map[string]string{}
 				wantInsights := map[string]*model.Insight{}
+				wantActive := make(map[string]*model.Insight, len(all))
+				for _, ins := range all {
+					wantActive[ins.ID] = ins
+				}
+				wantTransitions := make(map[string][]referenceRecallTransition)
 				for _, anchor := range []string{"n-00", "n-01", "n-07", "n-00"} {
-					cache.beamSearchFromAnchor(anchor, 1, GetWeights(intent), params, gotScores, gotVia)
-					referenceBeamSearch(db, anchor, 1, queryVec, GetWeights(intent), params, wantScores, wantVia, wantInsights, vectors)
+					cache.beamSearchFromAnchor(anchor, 1, params, gotScores, gotVia)
+					referenceBeamSearch(db, anchor, 1, queryVec, GetWeights(intent), params, wantScores, wantVia, wantInsights, vectors, wantActive, wantTransitions)
 				}
 				if !reflect.DeepEqual(gotScores, wantScores) || !reflect.DeepEqual(gotVia, wantVia) {
 					t.Fatalf("intent=%s params=%+v query=%v: cached scores/via differ from reference", intent, params, queryVec)
@@ -161,5 +169,36 @@ func TestRecallTimeAnchorsRespectOffsetsAndNewEdges(t *testing.T) {
 	resp, err = IntentAwareRecall(db, "", nil, nil, 0, nil)
 	if err != nil || len(resp.Results) != anchorTopK+1 {
 		t.Fatalf("next recall failed to discover newly connected node: %+v, %v", resp, err)
+	}
+}
+
+// The CLI now passes an already-loaded snapshot to recall. An out-of-order
+// snapshot must retain time-anchor selection without mutating the caller's slice.
+func TestRecallFromSnapshotPreservesTimeAnchorsAndInput(t *testing.T) {
+	db := testDB(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < anchorTopK+3; i++ {
+		insertInsight(t, db, fmt.Sprintf("snapshot-%02d", i), "record", "test", 3, nil, base.Add(time.Duration(i)*time.Minute))
+	}
+	all, err := db.GetAllActiveInsights()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rng := rand.New(rand.NewSource(43))
+	rng.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
+	original := append([]*model.Insight(nil), all...)
+	want, err := IntentAwareRecall(db, "", nil, nil, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := IntentAwareRecallFrom(db, all, "", nil, nil, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("caller snapshot changed recall: got=%+v want=%+v", got, want)
+	}
+	if !reflect.DeepEqual(all, original) {
+		t.Fatal("recall reordered the caller's snapshot")
 	}
 }

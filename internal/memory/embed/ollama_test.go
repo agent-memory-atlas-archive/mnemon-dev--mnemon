@@ -1,6 +1,7 @@
 package embed
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -117,5 +118,52 @@ func TestOllamaEndpointWithTrailingSlash(t *testing.T) {
 	}
 	if len(vec) != 3 {
 		t.Fatalf("expected 3 dims, got %d", len(vec))
+	}
+}
+
+// keepAliveSent embeds once against a stub server under the given protocol
+// and returns the keep_alive field of the request body ("" when absent).
+func keepAliveSent(t *testing.T, protocol, route string) string {
+	t.Helper()
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if protocol == "openai" {
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1]}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"embeddings":[[0.1]]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("MNEMON_EMBED_PROTOCOL", protocol)
+	t.Setenv("MNEMON_EMBED_ENDPOINT", srv.URL+route)
+	if _, err := NewClient().Embed("hello"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	s, _ := got["keep_alive"].(string)
+	return s
+}
+
+func TestOllamaEmbed_SendsDefaultKeepAlive(t *testing.T) {
+	t.Setenv("MNEMON_EMBED_KEEP_ALIVE", "")
+	if got := keepAliveSent(t, "ollama", ""); got != DefaultKeepAlive {
+		t.Fatalf("keep_alive = %q, want %q", got, DefaultKeepAlive)
+	}
+}
+
+func TestOllamaEmbed_KeepAliveEnvOverride(t *testing.T) {
+	t.Setenv("MNEMON_EMBED_KEEP_ALIVE", "2h")
+	if got := keepAliveSent(t, "ollama", ""); got != "2h" {
+		t.Fatalf("keep_alive = %q, want %q", got, "2h")
+	}
+}
+
+func TestOpenAIEmbed_OmitsKeepAlive(t *testing.T) {
+	t.Setenv("MNEMON_EMBED_KEEP_ALIVE", "")
+	if got := keepAliveSent(t, "openai", "/v1"); got != "" {
+		t.Fatalf("keep_alive = %q, want it omitted", got)
 	}
 }

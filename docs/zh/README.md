@@ -136,6 +136,12 @@ ZCode 会将 Mnemon skill 安装到 `~/.zcode/skills/`，并在
 模型调用前会收到 recall 指引，停止时会评估 durable-memory 回写。不加
 `--global` 时只安装项目 skill，因为 ZCode 当前不会执行项目级 hooks 配置。
 
+Stop hook 优先检查 `stop_hook_active`，避免重复提醒。完成标记兼容 `mnemon`、
+`durable memory`、`持久记忆` 和 `写入记忆`；提醒会要求在评估结果中包含
+`[mnemon]`，以支持任意语言。Windows hooks 显式以 UTF-8 解码 stdin，含中文
+标记的 PowerShell 脚本带 UTF-8 BOM，以兼容 Windows PowerShell 5.1。
+重新运行 setup 并开启新的 ZCode 会话，即可更新已安装的 hooks。
+
 ### [MiniMax Code](https://github.com/MiniMax-AI/minimax-code)
 
 ```bash
@@ -209,6 +215,10 @@ OpenCode 会将 mnemon skill 部署到 `.opencode/skills/`，通过
 `opencode.json` 的 `instructions` 注册生成的 guide，并在
 `.opencode/plugins/` 安装原生 plugin。该 plugin 会在聊天请求前注入
 recall context，并在 session compaction 中加入 Mnemon guidance。
+
+该 plugin 支持 OpenCode v2 和 v1.18.29 及以上版本。更新 Mnemon 后，
+请按原安装范围重新运行 setup（用户级安装加 `--global`），再重启 OpenCode
+以替换旧 plugin。运行环境要求见 [OpenCode 配置说明](USAGE.md#opencode)。
 
 ### [OpenClaw](https://github.com/openclaw/openclaw)
 
@@ -420,6 +430,7 @@ Sub-agent 委派是可选执行策略。当 runtime 支持时，主 agent 可以
 | `MNEMON_EMBED_MODEL` | `nomic-embed-text` | 嵌入模型名称 |
 | `MNEMON_EMBED_PROTOCOL` | *（自动探测）* | `ollama` 或 `openai`；端点以 `/v1` 结尾时自动切换 |
 | `MNEMON_EMBED_API_KEY` | *（无）* | OpenAI 兼容服务器（oMLX、vLLM 等）的 Bearer 令牌 |
+| `MNEMON_EMBED_KEEP_ALIVE` | `30m` | 每次请求后 Ollama 保持嵌入模型加载的时长（OpenAI 兼容服务器忽略此项） |
 | `MNEMON_EMBED_DIMENSIONS` | *（原生维度）* | 可选的 Matryoshka 维度截断 |
 
 每次自动删除均为软删除，以 `prune` 操作记录到 oplog，并通过触发命令的

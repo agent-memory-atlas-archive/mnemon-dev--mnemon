@@ -160,6 +160,14 @@ sessions, add recall guidance before model calls, and prompt for durable-memory
 writeback at stop. Without `--global`, setup installs only the project skill;
 ZCode currently ignores project-level hook configuration.
 
+The Stop hook honors `stop_hook_active` to avoid repeated reminders. Its
+completion fallback recognizes `mnemon`, `durable memory`, `持久记忆`, and
+`写入记忆`; the reminder asks for a `[mnemon]` marker so evaluations in any
+language can finish without another reminder. Windows hooks decode stdin as
+UTF-8, and the PowerShell script containing Chinese tokens includes a UTF-8 BOM
+for Windows PowerShell 5.1. Re-run setup and start a new ZCode session to update
+previously installed hooks.
+
 ### [MiniMax Code](https://github.com/MiniMax-AI/minimax-code)
 
 ```bash
@@ -235,6 +243,11 @@ OpenCode deploys the mnemon skill to `.opencode/skills/`, registers the
 generated guide through `opencode.json` instructions, and installs a native
 plugin in `.opencode/plugins/`. The plugin injects recall context before chat
 requests and adds Mnemon guidance to session compaction.
+
+The plugin supports OpenCode v2 and v1.18.29 or newer. After updating Mnemon,
+rerun setup with the same scope (add `--global` for a user-wide installation),
+then restart OpenCode to replace an older plugin. See the
+[OpenCode setup notes](docs/USAGE.md#opencode) for runtime requirements.
 
 ### [OpenClaw](https://github.com/openclaw/openclaw)
 
@@ -485,6 +498,7 @@ reported by ID in the triggering command's `auto_pruned_ids` field.
 | `MNEMON_EMBED_MODEL` | `nomic-embed-text` | Embedding model name |
 | `MNEMON_EMBED_PROTOCOL` | *(auto-detect)* | `ollama` or `openai`; auto-detected from an endpoint ending in `/v1` |
 | `MNEMON_EMBED_API_KEY` | *(none)* | Bearer token for OpenAI-compatible servers (oMLX, vLLM, etc.) |
+| `MNEMON_EMBED_KEEP_ALIVE` | `30m` | How long Ollama keeps the embedding model loaded after each request (ignored for OpenAI-compatible servers) |
 | `MNEMON_EMBED_DIMENSIONS` | *(native)* | Optional Matryoshka dimension truncation |
 
 The embedding client speaks the Ollama API by default and the

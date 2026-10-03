@@ -2,13 +2,16 @@ package search
 
 import (
 	"container/heap"
+	"sort"
+
 	"github.com/mnemon-dev/mnemon/internal/memory/embed"
 	"github.com/mnemon-dev/mnemon/internal/memory/model"
 	"github.com/mnemon-dev/mnemon/internal/memory/store"
 )
 
-// referenceBeamSearch is the traversal from ceebe145. Keep its independent
-// database reads and cosine calculations as an oracle for cached traversal.
+// referenceBeamSearch and referenceRankRecallTransitions preserve the traversal
+// and intent-ranked visit budget from upstream 5c98ff9c. Keep their full-vector
+// cosine calculations independent of the production scalar/transition cache.
 func referenceBeamSearch(
 	db *store.DB,
 	startID string,
@@ -20,6 +23,8 @@ func referenceBeamSearch(
 	viaMap map[string]string,
 	insightMap map[string]*model.Insight,
 	embedCache map[string][]float64,
+	activeByID map[string]*model.Insight,
+	edgeCache map[string][]referenceRecallTransition,
 ) {
 	visited := map[string]bool{startID: true}
 	totalVisited := 1
@@ -46,41 +51,29 @@ func referenceBeamSearch(
 				break
 			}
 
-			edges, err := db.GetEdgesByNode(cur.id)
-			if err != nil {
-				continue
+			transitions, cached := edgeCache[cur.id]
+			if !cached {
+				edges, err := db.GetNeighborEdges(cur.id)
+				if err != nil {
+					continue
+				}
+				transitions = referenceRankRecallTransitions(cur.id, edges, queryVec, weights, embedCache)
+				edgeCache[cur.id] = transitions
 			}
 
-			for _, e := range edges {
+			for _, transition := range transitions {
 				if totalVisited >= params.MaxVisited {
 					break
 				}
-				neighborID := e.TargetID
-				if neighborID == cur.id {
-					neighborID = e.SourceID
-				}
-
-				// MAGMA transition score (P6): additive accumulation
-				// score_v = score_u + λ₁·φ(edgeType, intent) + λ₂·sim(v_neighbor, v_query)
-				structural := weights[e.EdgeType] * e.Weight // φ(edgeType, intent) * edge_weight
-				semantic := 0.0
-				if queryVec != nil && embedCache != nil {
-					if nVec, ok := embedCache[neighborID]; ok {
-						cosSim := embed.CosineSimilarity(queryVec, nVec)
-						if cosSim > 0 {
-							semantic = cosSim
-						}
-					}
-				}
-				neighborScore := cur.score + lambda1*structural + lambda2*semantic
+				neighborID := transition.id
+				neighborScore := cur.score + transition.delta
 
 				// Update global score map if this path is better
 				if existing, ok := scoreMap[neighborID]; !ok || neighborScore > existing {
 					scoreMap[neighborID] = neighborScore
-					viaMap[neighborID] = string(e.EdgeType)
+					viaMap[neighborID] = string(transition.edgeType)
 					if _, loaded := insightMap[neighborID]; !loaded {
-						ins, err := db.GetInsightByID(neighborID)
-						if err == nil && ins != nil {
+						if ins, ok := activeByID[neighborID]; ok {
 							insightMap[neighborID] = ins
 						}
 					}
@@ -106,4 +99,45 @@ func referenceBeamSearch(
 		}
 		current = pruned
 	}
+}
+
+type referenceRecallTransition struct {
+	id       string
+	edgeType model.EdgeType
+	delta    float64
+}
+
+// referenceRankRecallTransitions applies the same intent and similarity terms as beam
+// scoring before the visit budget can discard a neighbour. The ordering and
+// deltas are reusable across anchors within this one recall, whose query and
+// intent do not change. The current path score is added by the caller.
+func referenceRankRecallTransitions(nodeID string, edges []*model.Edge, query []float64,
+	weights IntentWeights, embeddings map[string][]float64) []referenceRecallTransition {
+	transitions := make([]referenceRecallTransition, 0, len(edges))
+	for _, e := range edges {
+		id := e.TargetID
+		if id == nodeID {
+			id = e.SourceID
+		}
+		delta := lambda1 * weights[e.EdgeType] * e.Weight
+		if query != nil {
+			if vector, ok := embeddings[id]; ok {
+				if similarity := embed.CosineSimilarity(query, vector); similarity > 0 {
+					delta += lambda2 * similarity
+				}
+			}
+		}
+		transitions = append(transitions, referenceRecallTransition{id: id, edgeType: e.EdgeType, delta: delta})
+	}
+	sort.Slice(transitions, func(i, j int) bool {
+		a, b := transitions[i], transitions[j]
+		if a.delta != b.delta {
+			return a.delta > b.delta
+		}
+		if a.id != b.id {
+			return a.id < b.id
+		}
+		return a.edgeType < b.edgeType
+	})
+	return transitions
 }

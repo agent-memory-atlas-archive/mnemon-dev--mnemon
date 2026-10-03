@@ -13,6 +13,7 @@ var (
 	gcThreshold float64
 	gcLimit     int
 	gcKeepID    string
+	gcCompact   bool
 )
 
 var gcCmd = &cobra.Command{
@@ -27,7 +28,13 @@ Suggest mode (default):
 
 Keep mode:
 	mnemon gc --keep <id>
-  Boosts an insight's retention (access_count +3, refreshes timestamp).`,
+  Boosts an insight's retention (access_count +3, refreshes timestamp).
+
+Compact mode:
+  mnemon gc --compact
+  Rewrites the database with VACUUM. Recall bumps access counters on every
+  hit, which scatters table pages across the file and makes cold recalls
+  slow; compacting restores sequential layout. Run it weekly or so.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requirePositiveLimit("--limit", gcLimit); err != nil {
 			return err
@@ -41,6 +48,24 @@ Keep mode:
 			return fmt.Errorf("open database: %w", err)
 		}
 		defer db.Close()
+
+		if gcCompact {
+			if err := requireWritableDB(db, "gc --compact"); err != nil {
+				return err
+			}
+			before, after, err := db.Compact()
+			if err != nil {
+				return err
+			}
+			db.LogOp("gc_compact", "", fmt.Sprintf("bytes %d -> %d", before, after))
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]interface{}{
+				"status":       "compacted",
+				"bytes_before": before,
+				"bytes_after":  after,
+			})
+		}
 
 		// Keep mode: boost retention for a specific insight
 		if gcKeepID != "" {
@@ -106,5 +131,6 @@ func init() {
 	gcCmd.Flags().Float64Var(&gcThreshold, "threshold", 0.5, "effective_importance threshold (insights below this are candidates)")
 	gcCmd.Flags().IntVar(&gcLimit, "limit", 20, "max candidates to return")
 	gcCmd.Flags().StringVar(&gcKeepID, "keep", "", "boost retention for this insight ID")
+	gcCmd.Flags().BoolVar(&gcCompact, "compact", false, "rewrite the database with VACUUM to speed up cold recalls")
 	rootCmd.AddCommand(gcCmd)
 }

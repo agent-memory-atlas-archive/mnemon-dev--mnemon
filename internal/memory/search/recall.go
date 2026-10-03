@@ -128,6 +128,18 @@ type RecallResult struct {
 // 6. Sparse hint detection
 func IntentAwareRecall(db *store.DB, query string, queryVec []float64,
 	queryEntities []string, limit int, intentOverride *Intent) (RecallResponse, error) {
+	all, err := db.GetAllActiveInsights()
+	if err != nil {
+		return RecallResponse{}, err
+	}
+	return IntentAwareRecallFrom(db, all, query, queryVec, queryEntities, limit, intentOverride)
+}
+
+// IntentAwareRecallFrom is IntentAwareRecall over a caller-loaded snapshot of
+// the active insights, so a caller that already scanned them (for example to
+// build the known-entity set) does not scan the table twice.
+func IntentAwareRecallFrom(db *store.DB, all []*model.Insight, query string, queryVec []float64,
+	queryEntities []string, limit int, intentOverride *Intent) (RecallResponse, error) {
 
 	// Step 1: Intent determination
 	var intent Intent
@@ -142,15 +154,9 @@ func IntentAwareRecall(db *store.DB, query string, queryVec []float64,
 	weights := GetWeights(intent)
 	params := getTraversalParams(intent)
 
-	// Get all active insights
-	all, err := db.GetAllActiveInsights()
-	if err != nil {
-		return RecallResponse{}, err
-	}
-
-	// Cache only this query's scalar signals and the adjacency lists it visits.
+	// Cache only this query's scalar signals and ranked transitions it visits.
 	// Full vectors and token sets need not survive their first scoring pass.
-	cache := newRecallCache(db, all, queryVec)
+	cache := newRecallCache(db, all, queryVec, weights)
 	hasEmbeddings := len(cache.similarities) > 0
 
 	// Step 2: Multi-signal anchor selection via RRF
@@ -246,7 +252,7 @@ func IntentAwareRecall(db *store.DB, query string, queryVec []float64,
 
 	// Step 3: Beam search from each anchor
 	for id, a := range anchorMap {
-		cache.beamSearchFromAnchor(id, a.score, weights, params, scoreMap, viaMap)
+		cache.beamSearchFromAnchor(id, a.score, params, scoreMap, viaMap)
 	}
 
 	traversedCount := len(scoreMap)
@@ -475,11 +481,10 @@ func causalTopologicalSort(db *store.DB, results []RecallResult) []RecallResult 
 }
 
 // beamSearchFromAnchor keeps traversal budgets and per-anchor visited sets local;
-// adjacency and similarities are reused across anchors within this recall only.
+// ranked transitions and similarities are reused within this recall only.
 func (cache *recallCache) beamSearchFromAnchor(
 	startID string,
 	startScore float64,
-	weights IntentWeights,
 	params TraversalParams,
 	scoreMap map[string]float64,
 	viaMap map[string]string,
@@ -509,33 +514,22 @@ func (cache *recallCache) beamSearchFromAnchor(
 				break
 			}
 
-			edges, err := cache.edgesFor(cur.id)
+			transitions, err := cache.transitionsFor(cur.id)
 			if err != nil {
 				continue
 			}
 
-			for _, e := range edges {
+			for _, transition := range transitions {
 				if totalVisited >= params.MaxVisited {
 					break
 				}
-				neighborID := e.TargetID
-				if neighborID == cur.id {
-					neighborID = e.SourceID
-				}
-
-				// MAGMA transition score (P6): additive accumulation
-				// score_v = score_u + λ₁·φ(edgeType, intent) + λ₂·sim(v_neighbor, v_query)
-				structural := weights[e.EdgeType] * e.Weight // φ(edgeType, intent) * edge_weight
-				semantic := 0.0
-				if sim := cache.similarities[neighborID]; sim > 0 {
-					semantic = sim
-				}
-				neighborScore := cur.score + lambda1*structural + lambda2*semantic
+				neighborID := transition.id
+				neighborScore := cur.score + transition.delta
 
 				// Update global score map if this path is better
 				if existing, ok := scoreMap[neighborID]; !ok || neighborScore > existing {
 					scoreMap[neighborID] = neighborScore
-					viaMap[neighborID] = string(e.EdgeType)
+					viaMap[neighborID] = string(transition.edgeType)
 				}
 
 				if !visited[neighborID] {
