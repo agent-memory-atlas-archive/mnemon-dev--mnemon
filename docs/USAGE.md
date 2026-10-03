@@ -92,6 +92,31 @@ mnemon setup --eject --target claude-code
 | `--eject` | `false` | Remove mnemon integrations |
 | `--yes` | `false` | Auto-confirm all prompts |
 
+### OpenCode
+
+The installed plugin supports OpenCode v2 (verified with 2.0.18) and v1.18.29
+or newer. Earlier v1 releases may require function exports instead of its shared
+`server`/`setup` entrypoint; upgrade OpenCode before refreshing the integration.
+
+After updating Mnemon, run `mnemon setup --target opencode --yes` again in the
+project, or add `--global` if the original installation was user-wide. Restart
+OpenCode afterward. Updating the Mnemon binary alone does not replace an
+already installed `.opencode/plugins/mnemon.js` (or
+`~/.config/opencode/plugins/mnemon.js`).
+
+Keep `mnemon` on OpenCode's `PATH`. The plugin runs the CLI through Node's
+child-process API, which both OpenCode runtimes provide; a separate Bun
+installation is unnecessary. Native executables and standard npm installations
+are supported on Unix and Windows. npm installations resolve directly to their
+platform binary so a timeout also stops the memory command.
+
+Recall is added to the latest user message before each model request. Tool
+continuations reuse that turn's recall without duplicating it; a new user turn
+refreshes it. The cache is isolated by session, retains at most 128 sessions,
+and is cleared on plugin unload. Compaction receives the durable-memory
+guidance, and shell commands receive `MNEMON_OPENCODE=1`. Missing or failed CLI
+calls leave the conversation usable; each call has a five-second timeout.
+
 ---
 
 ## Memory CLI Commands
