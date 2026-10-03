@@ -236,6 +236,11 @@ generated guide through `opencode.json` instructions, and installs a native
 plugin in `.opencode/plugins/`. The plugin injects recall context before chat
 requests and adds Mnemon guidance to session compaction.
 
+The plugin supports OpenCode v2 and v1.18.29 or newer. After updating Mnemon,
+rerun setup with the same scope (add `--global` for a user-wide installation),
+then restart OpenCode to replace an older plugin. See the
+[OpenCode setup notes](docs/USAGE.md#opencode) for runtime requirements.
+
 ### [OpenClaw](https://github.com/openclaw/openclaw)
 
 ```bash

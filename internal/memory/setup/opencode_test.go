@@ -36,7 +36,11 @@ func TestOpenCodeWriteSkillAndPlugin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read plugin: %v", err)
 	}
-	for _, want := range []string{"experimental.chat.messages.transform", "experimental.session.compacting", "shell.env"} {
+	for _, want := range []string{
+		`export default { id: "mnemon", setup, server }`,
+		`ctx.session.hook("context"`, `ctx.session.hook("compaction"`, `ctx.shell.hook("create.before"`,
+		"experimental.chat.messages.transform", "experimental.session.compacting", "shell.env",
+	} {
 		if !strings.Contains(string(plugin), want) {
 			t.Fatalf("plugin missing %q: %s", want, string(plugin))
 		}

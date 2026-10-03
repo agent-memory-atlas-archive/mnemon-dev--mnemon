@@ -210,6 +210,10 @@ OpenCode 会将 mnemon skill 部署到 `.opencode/skills/`，通过
 `.opencode/plugins/` 安装原生 plugin。该 plugin 会在聊天请求前注入
 recall context，并在 session compaction 中加入 Mnemon guidance。
 
+该 plugin 支持 OpenCode v2 和 v1.18.29 及以上版本。更新 Mnemon 后，
+请按原安装范围重新运行 setup（用户级安装加 `--global`），再重启 OpenCode
+以替换旧 plugin。运行环境要求见 [OpenCode 配置说明](USAGE.md#opencode)。
+
 ### [OpenClaw](https://github.com/openclaw/openclaw)
 
 ```bash
