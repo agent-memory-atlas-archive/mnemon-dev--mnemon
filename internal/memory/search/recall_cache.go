@@ -48,9 +48,12 @@ func (c *recallCache) transitionsFor(id string) ([]recallTransition, error) {
 
 func loadQuerySimilarities(db *store.DB, queryVec []float64) map[string]float64 {
 	scores := make(map[string]float64)
+	var decoded []float64
 	// The callback only computes a scalar; it never re-enters the single-conn DB.
+	// Consume each vector immediately so the next row can reuse its decode buffer.
 	err := db.ScanEmbeddings(func(id string, blob []byte) bool {
-		if vec := embed.DeserializeVector(blob); vec != nil {
+		if vec := embed.DeserializeVectorInto(blob, decoded); vec != nil {
+			decoded = vec
 			scores[id] = embed.CosineSimilarity(queryVec, vec)
 		}
 		return true
