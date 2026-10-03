@@ -39,6 +39,44 @@ func (db *DB) GetEdgesByNode(nodeID string) ([]*model.Edge, error) {
 	return scanEdges(rows)
 }
 
+// GetTraversalEdges returns incident edges in insertion order, optionally
+// filtered by type. BFS previously obtained this order by scanning the entire
+// edges table; preserving it matters when a node limit cuts a frontier.
+func (db *DB) GetTraversalEdges(nodeID string, edgeType model.EdgeType) ([]*model.Edge, error) {
+	query, args := traversalEdgeQuery(nodeID, edgeType)
+	rows, err := db.execer().Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	edges, err := scanEdges(rows)
+	if err != nil {
+		return nil, err
+	}
+	return edges, rows.Err()
+}
+
+func traversalEdgeQuery(nodeID string, edgeType model.EdgeType) (string, []any) {
+	const columns = "source_id, target_id, edge_type, weight, metadata, created_at"
+	source := "SELECT rowid AS edge_order, " + columns + " FROM edges WHERE source_id = ?"
+	target := "SELECT rowid AS edge_order, " + columns + " FROM edges WHERE target_id = ? AND source_id != ?"
+	args := []any{nodeID}
+	if edgeType != "" {
+		source += " AND edge_type = ?"
+		target += " AND edge_type = ?"
+		args = append(args, string(edgeType))
+	}
+	args = append(args, nodeID, nodeID)
+	if edgeType != "" {
+		args = append(args, string(edgeType))
+	}
+	// UNION keeps each endpoint lookup on its own composite index. A factored
+	// OR with an edge_type filter can instead scan every edge of that type.
+	// Excluding self-loops from the target branch returns each edge only once.
+	query := "SELECT " + columns + " FROM (" + source + " UNION ALL " + target + ") ORDER BY edge_order"
+	return query, args
+}
+
 // supersededLookupChunk bounds how many ids go into one IN clause. SQLite's
 // host-parameter ceiling is 32766 on current builds and 999 on older ones;
 // 500 stays inside both. Recall's candidate set is normally far smaller, so

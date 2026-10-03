@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"database/sql"
+	"errors"
 	"github.com/mnemon-dev/mnemon/internal/memory/model"
 	"github.com/mnemon-dev/mnemon/internal/memory/store"
 )
@@ -19,29 +21,17 @@ type BFSOptions struct {
 	EdgeFilter model.EdgeType // filter by edge type (empty = all types)
 }
 
-// BFS performs breadth-first traversal from startID over the full graph.
-// Pre-loads all active insights and edges to avoid N+1 queries.
-// The start node is excluded from results. Only active (non-deleted) nodes are visited.
+// BFS performs breadth-first traversal. Bounded neighborhoods use indexed
+// reads so disconnected history is not loaded. Unlimited traversals preload the
+// graph to avoid a query per node. Both paths preserve edge insertion order.
+// The start node is excluded. Only active (non-deleted) nodes are visited.
 func BFS(db *store.DB, startID string, opts BFSOptions) []BFSNode {
-	allInsights, err := db.GetAllActiveInsights()
-	if err != nil {
+	if opts.MaxDepth <= 0 {
 		return nil
 	}
-	insightMap := make(map[string]*model.Insight, len(allInsights))
-	for _, ins := range allInsights {
-		insightMap[ins.ID] = ins
-	}
-
-	allEdges, err := db.GetAllEdges()
+	view, err := newBFSView(db, opts)
 	if err != nil {
 		return nil
-	}
-	edgeAdj := make(map[string][]*model.Edge)
-	for _, e := range allEdges {
-		edgeAdj[e.SourceID] = append(edgeAdj[e.SourceID], e)
-		if e.SourceID != e.TargetID {
-			edgeAdj[e.TargetID] = append(edgeAdj[e.TargetID], e)
-		}
 	}
 
 	type entry struct {
@@ -65,7 +55,11 @@ func BFS(db *store.DB, startID string, opts BFSOptions) []BFSNode {
 			continue
 		}
 
-		for _, edge := range edgeAdj[cur.id] {
+		edges, err := view.edgesFor(cur.id, opts.EdgeFilter)
+		if err != nil {
+			return nil
+		}
+		for _, edge := range edges {
 			if opts.EdgeFilter != "" && edge.EdgeType != opts.EdgeFilter {
 				continue
 			}
@@ -80,7 +74,10 @@ func BFS(db *store.DB, startID string, opts BFSOptions) []BFSNode {
 			}
 			visited[neighborID] = true
 
-			insight := insightMap[neighborID]
+			insight, err := view.insightFor(neighborID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
 			if insight == nil {
 				continue // soft-deleted or missing
 			}
@@ -103,4 +100,53 @@ func BFS(db *store.DB, startID string, opts BFSOptions) []BFSNode {
 	}
 
 	return result
+}
+
+// bfsView owns either the bulk snapshot or indexed reads for this traversal.
+// It never retains state between requests or starts background work.
+type bfsView struct {
+	db       *store.DB
+	insights map[string]*model.Insight
+	adj      map[string][]*model.Edge
+}
+
+func newBFSView(db *store.DB, opts BFSOptions) (*bfsView, error) {
+	v := &bfsView{db: db}
+	if opts.MaxNodes > 0 {
+		return v, nil
+	}
+	all, err := db.GetAllActiveInsights()
+	if err != nil {
+		return nil, err
+	}
+	v.insights = make(map[string]*model.Insight, len(all))
+	for _, ins := range all {
+		v.insights[ins.ID] = ins
+	}
+	edges, err := db.GetAllEdges()
+	if err != nil {
+		return nil, err
+	}
+	v.adj = make(map[string][]*model.Edge)
+	for _, edge := range edges {
+		v.adj[edge.SourceID] = append(v.adj[edge.SourceID], edge)
+		if edge.SourceID != edge.TargetID {
+			v.adj[edge.TargetID] = append(v.adj[edge.TargetID], edge)
+		}
+	}
+	return v, nil
+}
+
+func (v *bfsView) edgesFor(id string, edgeType model.EdgeType) ([]*model.Edge, error) {
+	if v.adj != nil {
+		return v.adj[id], nil
+	}
+	return v.db.GetTraversalEdges(id, edgeType)
+}
+
+func (v *bfsView) insightFor(id string) (*model.Insight, error) {
+	if v.insights != nil {
+		return v.insights[id], nil
+	}
+	return v.db.GetInsightByID(id)
 }

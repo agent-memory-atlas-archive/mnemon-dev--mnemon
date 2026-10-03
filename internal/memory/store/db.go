@@ -308,10 +308,17 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 
 CREATE INDEX IF NOT EXISTS idx_insights_category ON insights(category);
-CREATE INDEX IF NOT EXISTS idx_insights_importance ON insights(importance);
-CREATE INDEX IF NOT EXISTS idx_insights_created ON insights(created_at);
 CREATE INDEX IF NOT EXISTS idx_insights_deleted ON insights(deleted_at);
-CREATE INDEX IF NOT EXISTS idx_insights_source ON insights(source);
+-- Match active read paths without sorting every matching row before LIMIT.
+CREATE INDEX IF NOT EXISTS idx_insights_active_created ON insights(deleted_at, created_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_insights_active_source_created ON insights(source, created_at) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_insights_active_ranked ON insights(deleted_at, importance DESC, created_at DESC) WHERE deleted_at IS NULL;
+-- The active composite indexes replace these single-column read indexes; do
+-- not make every insert maintain both versions. Keep the deleted index for
+-- counts that include deleted history.
+DROP INDEX IF EXISTS idx_insights_importance;
+DROP INDEX IF EXISTS idx_insights_created;
+DROP INDEX IF EXISTS idx_insights_source;
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
 CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(edge_type);

@@ -72,7 +72,10 @@ func (e *Engine) OnInsightCreated(insight *model.Insight) EdgeStats {
 	//    the graph propagates into new insights without dictionary edits. On
 	//    error the index lookup falls through to nil and behavior matches the
 	//    non-indexed extractor.
-	knownEntities, _ := e.db.LoadKnownEntities()
+	var knownEntities map[string]bool
+	if e.entityMode != EntityModeProvided {
+		knownEntities, _ = e.db.LoadKnownEntities()
+	}
 	insight.Entities = ResolveEntitiesIndexed(insight.Content, insight.Entities, e.entityMode, knownEntities)
 
 	// 2. Temporal backbone + proximity edges
