@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@mnemon-dev/mnemon"><img alt="npm version" src="https://img.shields.io/npm/v/@mnemon-dev/mnemon?label=npm" /></a>
+  <a href="https://www.npmjs.com/package/@mnemon-dev/mnemon"><img alt="npm downloads" src="https://img.shields.io/npm/dt/@mnemon-dev/mnemon?label=downloads%20total" /></a>
   <a href="https://github.com/mnemon-dev/mnemon/releases/latest"><img alt="GitHub release" src="https://img.shields.io/github/v/release/mnemon-dev/mnemon" /></a>
   <a href="https://github.com/mnemon-dev/mnemon/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mnemon-dev/mnemon?label=stars" /></a>
   <a href="https://go.dev/"><img alt="Go 1.24+" src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&amp;logoColor=white" /></a>
